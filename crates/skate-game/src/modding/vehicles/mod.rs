@@ -458,7 +458,8 @@ pub(super) fn command(
                     };
                     for (node, position, radius) in mounts {
                         let Some(node) = &node else { continue };
-                        let mount = Vec3::from_array(position) - Vec3::Y * def.suspension_length;
+                        let scale = parts.wheel_scale.unwrap_or(1.0);
+                        let mount = Vec3::from_array(position) - Vec3::Y * (def.suspension_length + radius * (1.0 - scale));
                         let yaw = if position[0] < 0.0 { std::f32::consts::PI } else { 0.0 };
                         let hub = world.spawn((
                             Name::new(node.clone()),
@@ -469,7 +470,7 @@ pub(super) fn command(
                         world.spawn((
                             SceneRoot(wheel_scene.clone()),
                             Transform::from_rotation(Quat::from_rotation_y(yaw))
-                                .with_scale(Vec3::splat(radius / model_radius)),
+                                .with_scale(Vec3::splat(radius * scale / model_radius)),
                             ChildOf(hub),
                         ));
                     }

@@ -28,6 +28,9 @@ pub struct VehicleParts {
     #[serde(default)] pub seat: Option<[f32; 3]>,
     /// Bikes: front and rear axle positions along the body (m, +Z forward).
     #[serde(default)] pub wheel_z: Option<[f32; 2]>,
+    /// Tyre drawn at this share of the physics wheel's size, hub lowered so
+    /// it still meets the ground.
+    #[serde(default)] pub wheel_scale: Option<f32>,
 }
 impl VehicleParts {
     fn valid(&self) -> bool {
@@ -36,6 +39,7 @@ impl VehicleParts {
             && self.layout.as_deref().is_none_or(|l| matches!(l, "kart" | "bike" | "atv"))
             && self.seat.is_none_or(|s| s.iter().all(|v| v.is_finite() && v.abs() <= 3.0))
             && self.wheel_z.is_none_or(|z| z.iter().all(|v| v.is_finite() && v.abs() <= 3.0))
+            && self.wheel_scale.is_none_or(|s| s.is_finite() && (0.3..=2.0).contains(&s))
     }
     pub fn bike(&self) -> bool {
         self.layout.as_deref() == Some("bike")

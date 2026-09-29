@@ -126,7 +126,7 @@ def main():
               + (',wheel_z={' + ','.join(f'{v:.3f}' for v in b['wheel_z']) + '}' if b.get('wheel_z') else '') + '},'
               for b in listing['bodies']]
     table += ['},tyres={']
-    table += [f' [{lua(t["name"])}]={{file={lua(t["file"])},radius={t["radius"]:.4f},grip={t["grip"]}}},'
+    table += [f' [{lua(t["name"])}]={{file={lua(t["file"])},radius={t["radius"]:.4f},grip={t["grip"]},scale={t.get("scale", 1.0)}}},'
               for t in listing['tyres']]
     table += ['}}']
     script = files['main.lua'].decode()
@@ -138,7 +138,7 @@ def main():
  local styles=PARTS.bodies[s.body]
  if not styles then return nil,nil end
  local n=tonumber(tostring(s.style or ''):match('%d+')) or 1
- return {body=styles[n] or styles[1],wheels=tyre.file,wheel_radius=tyre.radius,layout=styles.layout,seat=styles.seat,wheel_z=styles.wheel_z},tyre
+ return {body=styles[n] or styles[1],wheels=tyre.file,wheel_radius=tyre.radius,wheel_scale=tyre.scale,layout=styles.layout,seat=styles.seat,wheel_z=styles.wheel_z},tyre
 end
 local build=''
 local function build_key() local s=sdk.settings;return tostring(s.body)..'|'..tostring(s.style)..'|'..tostring(s.wheels) end

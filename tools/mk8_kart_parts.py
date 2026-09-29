@@ -30,6 +30,9 @@ from mk8_to_glb import SEATED, Y_UP, Rig, primitives, write_glb  # noqa: E402
 
 # Grip per tyre family (the mod's dry setup is 1.3), after MK8's traction
 # stats: slicks and slims hug the road, metal and wood slide.
+# Tyre families drawn a little smaller than the physics wheel (their MK8
+# look is low profile); the hub drops so they still meet the ground.
+SMALLER = ('Standard', 'Blue Standard', 'Monster', 'Hot Monster', 'Slick', 'Cyber Slick')
 GRIP = {'Standard': 1.3, 'Monster': 1.25, 'Slick': 1.5, 'Slim': 1.4, 'Metal': 1.05,
         'Wood': 1.15, 'Leaf': 1.2}
 TURN = 1
@@ -184,30 +187,79 @@ def surface_points(parts, per_part=20000):
     return np.concatenate(out)
 
 
-def bike_mounts(p, R, yc, cell=0.02, clip=0.12):
+# Hand-placed axles (m along the body, +Z forward) where the automatic
+# placement misreads a bike, checked against its side view.
+BIKE_WHEELS = {
+    'City Tripper': {'front': 0.95},  # under the front fender, not past the leg shield
+}
+
+# Z-up, -Y-forward rips to the parts' Y-up, +Z-forward frame (bike joints).
+JOINT_FRAME = np.array([[1, 0, 0], [0, 0, 1], [0, -1, 0]], dtype=float)
+
+
+def bike_axles(folder: Path, turned: bool):
+    """A bike's front and rear axles in its body's raw frame (as parts_of
+    returns it, before placement), from its own suspension arms (ArmB_*M):
+    the fork hangs from the steering head (Jnt_Handle) and ends at the front
+    axle; the swing arm hangs from its pivot (Jnt_ArmB, else the body
+    origin) and ends at the rear axle. Arms without a hanging fork are laid
+    out from the body origin. None when the rip has no arm model."""
+    import re as _re
+    arm = next(iter(sorted(folder.rglob('ArmB_*M.dae'))), None)
+    body = [p for p in folder.rglob('*.dae') if p.name.lower().startswith('bodyb') and 'fix' not in p.name.lower()]
+    if arm is None or not body:
+        return None
+    document = load(max(body, key=lambda p: p.stat().st_size))
+    joints = {}
+
+    def walk(node, matrix):
+        for child in node.children:
+            if isinstance(child, collada.scene.Node):
+                world = matrix @ child.matrix
+                name = _re.sub(r'^(node-)?(Armature_)?', '', child.id or '')
+                if name.startswith('Jnt_'):
+                    joints[name] = world[:3, 3] @ JOINT_FRAME.T
+                walk(child, world)
+    for node in document.scene.nodes:
+        walk(node, node.matrix)
+    frame = (lambda v: v @ JOINT_FRAME.T) if turned else (lambda v: v)
+    pieces = {_re.sub(r'^geom-', '', n).split('__')[0]: frame(p) for n, _, p, _, _ in parts_of(arm)}
+
+    def far_end(points):
+        distance = np.linalg.norm(points, axis=1)
+        end = points[distance > distance.max() - 0.3].mean(0)
+        end[0] = 0.0
+        return end
+    # Only a hanging fork pins the axles down; other arm sets are laid out
+    # about the body origin, which says nothing about axle height.
+    if 'ArmB_B' not in pieces or 'Sus' not in pieces or not {'Jnt_Handle', 'Jnt_ArmB'} <= joints.keys():
+        return None
+    fork = True
+    front = (joints.get('Jnt_Handle', np.zeros(3)) if fork else np.zeros(3)) + far_end(pieces.get('Sus', pieces.get('ArmB_F')))
+    rear = (joints.get('Jnt_ArmB', np.zeros(3)) if fork else np.zeros(3)) + far_end(pieces['ArmB_B'])
+    # Back into the raw frame of the body geometry.
+    if turned:
+        front, rear = front @ JOINT_FRAME, rear @ JOINT_FRAME
+    return front, rear
+
+
+def bike_mounts(p, R, yc, half=0.05, cell=0.02, clip=0.03):
     """Front and rear axle z for a bike body (points: sampled surface, +Z
     forward): searching outward from the middle, the first spot where the
-    wheel overlaps at most `clip` of its disc with the body and has body
-    above it (a fender, fork or frame). Falls back to clearing the body."""
-    q = p[np.abs(p[:, 0]) < 0.2]
+    tyre clears the body along its centre line (fork legs and fenders sit
+    either side of the tyre, so only a thin slice counts)."""
+    q = p[np.abs(p[:, 0]) < half]
     occ = set(map(tuple, np.floor(q[:, [2, 1]] / cell).astype(int)))
     key = lambda z, y: (int(np.floor(z / cell)), int(np.floor(y / cell)))
     disc = [(dz, dy) for dz in np.arange(-R, R + cell, cell) for dy in np.arange(-R, R + cell, cell) if np.hypot(dz, dy) < R * 0.95]
+
     def inside(z):
         return sum(key(z + dz, yc + dy) in occ for dz, dy in disc) / len(disc)
-    def covered(z):
-        # Body within 25 cm above the tyre's upper arc.
-        hits = 0
-        for a in np.linspace(0.35, np.pi - 0.35, 15):
-            hits += any(key(z + (R + d) * np.cos(a), yc + (R + d) * np.sin(a)) in occ for d in np.arange(0.02, 0.25, 0.02))
-        return hits / 15
+
     result = []
     for sign in (1, -1):
         zs = np.arange(0.2, 1.6, 0.02) * sign
-        best = next((z for z in zs if inside(z) <= clip and covered(z) >= 0.5), None)
-        if best is None:
-            best = next((z for z in zs if inside(z) <= clip), 0.9 * sign)
-        result.append(float(best))
+        result.append(float(next((z for z in zs if inside(z) <= clip), 0.9 * sign)))
     return result
 
 
@@ -295,8 +347,10 @@ def main():
         try:
             # Some rips come out standing on their tail (taller than long):
             # turn them onto their wheels.
-            if np.ptp(np.concatenate([p[2] for p in parts]), axis=0)[1] > np.ptp(np.concatenate([p[2] for p in parts]), axis=0)[2]:
-                turn = np.array([[1, 0, 0], [0, 0, TURN], [0, -TURN, 0]], dtype=float)
+            turned = np.ptp(np.concatenate([p[2] for p in parts]), axis=0)[1] > np.ptp(np.concatenate([p[2] for p in parts]), axis=0)[2]
+            turn = np.array([[1, 0, 0], [0, 0, TURN], [0, -TURN, 0]], dtype=float) if turned else np.eye(3)
+            raw_axles = bike_axles(args.mk8 / 'extracted_karts' / name, turned)
+            if turned:
                 parts = [(n, t, p @ turn.T, nm @ turn.T, uv) for n, t, p, nm, uv in parts]
             b_low, b_high = bounds(parts)
             scale = ref_length / (b_high[2] - b_low[2])
@@ -306,12 +360,22 @@ def main():
             daes = [d.name.lower() for d in (args.mk8 / 'extracted_karts' / name).rglob('*.dae')]
             bike = any(d.startswith('bodyb') for d in daes)
             mounts = None
-            if bike:
-                # Bikes ride between their wheels: underside just below the
-                # axles, then each tyre tucked into the body's wheel gap.
+            if bike and raw_axles is not None:
+                # The bike's own suspension arms set its axles; the body is
+                # raised so they sit at the physics wheels' height.
+                front, rear = (a @ turn.T * scale + offset for a in raw_axles)
+                lift = axle_y - (front[1] + rear[1]) / 2
+                placed = transform(placed, 1.0, np.array([0.0, lift, 0.0]))
+                mounts = [float(front[2]), float(rear[2])]
+            elif bike:
+                # No arm model: underside just below the axles, each tyre in
+                # the body's wheel gap.
                 lift = (axle_y - 0.1) - bounds(placed)[0][1]
                 placed = transform(placed, 1.0, np.array([0.0, max(lift, 0.0), 0.0]))
                 mounts = bike_mounts(surface_points(placed), wheel_radius, axle_y)
+            if bike and name in BIKE_WHEELS:
+                override = BIKE_WHEELS[name]
+                mounts = [override.get('front', mounts[0]), override.get('rear', mounts[1])]
             default, styles = body_styles(args.mk8 / 'extracted_karts' / name, parts)
             files = []
             for index, style in enumerate(styles or [None]):
@@ -370,6 +434,7 @@ def main():
                 write_glb(parts, args.mod / file, 1.0)
                 render_preview(parts, args.mod / file.replace('.glb', '.png'), yaw=-1.1, pitch=0.2)
                 listing['tyres'].append({'name': name, 'file': file, 'radius': radius, 'grip': GRIP[family],
+                                         'scale': 0.85 if name in SMALLER else 1.0,
                                          'preview': file.replace('.glb', '.png')})
                 print('tyre', name, f'radius {radius:.3f} axle width {size[0]:.3f}')
         except Exception as error:

@@ -537,6 +537,7 @@ fn debug_kart(world: &mut World, mut stage: Local<u32>) {
         wheel_radius: part(2).and_then(|r| r.parse().ok()), driver: part(3), layout: part(4),
         seat: part(5).and_then(|s| { let v: Vec<f32> = s.split(',').filter_map(|c| c.parse().ok()).collect(); (v.len() == 3).then(|| [v[0], v[1], v[2]]) }),
         wheel_z: None,
+        wheel_scale: None,
     };
     let root = world.resource::<crate::physics::SkaterRuntime>().animated_skeleton.roots.animation_to_world;
     let position = [root[3][0], root[3][1] + 1.0, root[3][2] + 3.0];
