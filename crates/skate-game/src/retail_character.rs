@@ -351,14 +351,20 @@ fn update(
     let sh = lighting.probes.sample(root.translation, fallback);
     let mut displayed = lighting.display_sh.map_or(sh, |old| {
         let weight = 1. - (-time.delta_secs().clamp(0., 0.05) / 0.35).exp();
-        std::array::from_fn(|i| old[i].lerp(sh[i], weight))
+        // Snap once within float noise, so a still skater's materials stop
+        // changing (each change re-uploads them).
+        std::array::from_fn(|i| if old[i].abs_diff_eq(sh[i], 1e-5) { sh[i] } else { old[i].lerp(sh[i], weight) })
     });
     // The night amount rides in the unused w for the lamp lighting
     // (dynamic_lights.wgsl): lamps are pre-divided by the night grade.
     displayed[0].w = shadow.1.z;
     publish_sh(&mut materials, displayed, &mut changed);
-    for (_, material) in customiser.iter_mut() {
-        if material.extension.retail.tint.w == 0. { continue; }
+    // iter_mut marks every material changed (a GPU re-upload each frame):
+    // only touch those whose lighting actually differs.
+    let stale: Vec<_> = customiser.iter().filter(|(_, m)| m.extension.retail.tint.w != 0.
+        && (m.extension.retail.light != lighting.light || m.extension.retail.sh != displayed)).map(|(id, _)| id).collect();
+    for id in stale {
+        let material = customiser.get_mut(id).expect("material enumerated in this call");
         material.extension.retail.light = lighting.light;
         material.extension.retail.sh = displayed;
     }

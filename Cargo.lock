@@ -4743,6 +4743,7 @@ dependencies = [
  "image",
  "naga",
  "naga_oil",
+ "rodio",
  "serde",
  "serde_json",
  "skate-core",

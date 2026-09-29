@@ -4,6 +4,7 @@ mod arm_ik;
 mod dropper;
 mod ambience;
 mod board_audio;
+mod pcm_audio;
 mod music;
 mod menu_skin;
 mod challenge_map;

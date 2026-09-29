@@ -98,7 +98,7 @@ pub(crate) fn build(
             .chain(),
     )
     .add_plugins(crate::fps_overlay::FpsOverlayPlugin)
-    .add_plugins((crate::ambience::AmbiencePlugin, crate::board_audio::BoardAudioPlugin, crate::music::MusicPlugin, crate::menu_skin::MenuSkinPlugin))
+    .add_plugins((crate::ambience::AmbiencePlugin, crate::board_audio::BoardAudioPlugin, crate::pcm_audio::PcmAudioPlugin, crate::music::MusicPlugin, crate::menu_skin::MenuSkinPlugin))
     .add_plugins(crate::prop_material::PropMaterialPlugin)
     .add_plugins(crate::dropper::DropperPlugin)
     .init_resource::<crate::props::PropColliders>()

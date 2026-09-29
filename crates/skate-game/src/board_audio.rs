@@ -27,6 +27,11 @@ fn full() -> f32 {
 #[derive(Resource)]
 struct Bank {
     sounds: HashMap<String, (Vec<Handle<AudioSource>>, f32)>,
+    /// Every clip decoded in memory (pcm_audio.rs). Each compressed play built
+    /// a new decoder on the main thread (a landing's five sounds cost a frame
+    /// ~9 ms), and the wheel spin-downs, started partway in, first decoded and
+    /// discarded everything before their start.
+    decoded: HashMap<AssetId<AudioSource>, crate::pcm_audio::Slot>,
     seed: u64,
     /// Menu board volume, refreshed every frame.
     gain: f32,
@@ -40,15 +45,22 @@ impl Bank {
         (self.seed >> 40) as f32 / (1u64 << 24) as f32
     }
     /// A wheel spin-down from `start` into its clip, faded by the caller.
-    fn play_from(&mut self, commands: &mut Commands, name: &str, gain: f32, start: std::time::Duration) -> Option<Entity> {
+    fn play_from(&mut self, commands: &mut Commands, clips_in_memory: &mut Assets<crate::pcm_audio::PcmClip>,
+                 name: &str, gain: f32, start: std::time::Duration) -> Option<Entity> {
         let (clips, volume) = self.sounds.get(name)?;
         let clip = clips.first()?.clone();
         let volume = volume * gain;
-        let mut settings = PlaybackSettings::DESPAWN.with_volume(Volume::Linear(volume * self.gain));
+        let settings = PlaybackSettings::DESPAWN.with_volume(Volume::Linear(volume * self.gain));
+        if let Some(pcm) = self.decoded.get(&clip.id()).and_then(crate::pcm_audio::ready) {
+            let player = AudioPlayer(clips_in_memory.add(pcm.from(start)));
+            return Some(commands.spawn((WheelSpin { fade: None, volume }, player, settings)).id());
+        }
+        // Still decoding: seek the compressed clip.
+        let mut settings = settings;
         settings.start_position = Some(start);
         Some(commands.spawn((WheelSpin { fade: None, volume }, AudioPlayer::new(clip), settings)).id())
     }
-    fn play(&mut self, commands: &mut Commands, name: &str, gain: f32) {
+    fn play(&mut self, commands: &mut Commands, clips_in_memory: &mut Assets<crate::pcm_audio::PcmClip>, name: &str, gain: f32) {
         let gain = gain * self.gain;
         let Some((clips, volume)) = self.sounds.get(name) else { return };
         if clips.is_empty() {
@@ -58,13 +70,12 @@ impl Bank {
         let clip = clips[(self.random() * clips.len() as f32) as usize % clips.len()].clone();
         if std::env::var("SKATE_DEBUG_AUDIO").is_ok() { info!("BOARD_SOUND {name} gain={gain:.2}"); }
         let speed = 0.94 + self.random() * 0.12;
-        commands.spawn((
-            OneShot,
-            AudioPlayer::new(clip),
-            PlaybackSettings::DESPAWN
-                .with_volume(Volume::Linear(volume * gain))
-                .with_speed(speed),
-        ));
+        let settings = PlaybackSettings::DESPAWN.with_volume(Volume::Linear(volume * gain)).with_speed(speed);
+        if let Some(pcm) = self.decoded.get(&clip.id()).and_then(crate::pcm_audio::ready) {
+            commands.spawn((OneShot, AudioPlayer(clips_in_memory.add(pcm.from(std::time::Duration::ZERO))), settings));
+        } else {
+            commands.spawn((OneShot, AudioPlayer::new(clip), settings));
+        }
     }
 }
 
@@ -335,7 +346,19 @@ fn load(mut commands: Commands, config: Res<crate::config::Config>, assets: Res<
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0x9E37_79B9_7F4A_7C15, |d| d.as_nanos() as u64)
         | 1;
-    commands.insert_resource(Bank { sounds, seed, gain: 1.0 });
+    // One-shots and wheel spins; the loops start once and never again.
+    let continuous: Vec<&str> = LOOPS.into_iter().chain(SURFACE_LOOPS.map(|(name, _)| name))
+        .chain(GRAIN_LOOPS.map(|(soft, _, _, _)| soft)).chain(GRAIN_LOOPS.map(|(_, hard, _, _)| hard)).collect();
+    let mut clips: Vec<(AssetId<AudioSource>, std::path::PathBuf)> = sounds.iter()
+        .filter(|(name, _)| !continuous.contains(&name.as_str()))
+        .flat_map(|(_, (handles, _))| handles.iter())
+        .filter_map(|h| Some((h.id(), config.asset_root.join(h.path()?.path()))))
+        .collect();
+    clips.sort_by(|a, b| a.1.cmp(&b.1));
+    clips.dedup_by(|a, b| a.0 == b.0);
+    let slots = crate::pcm_audio::decode_in_background(clips.iter().map(|(_, path)| path.clone()).collect());
+    let decoded = clips.into_iter().map(|(id, _)| id).zip(slots).collect();
+    commands.insert_resource(Bank { sounds, decoded, seed, gain: 1.0 });
 }
 
 /// The fast rolling layer of a surface family, if it has one.
@@ -365,6 +388,7 @@ fn update(
     mut spins: Query<(Entity, &mut WheelSpin, &mut AudioSink), Without<Loop>>,
     mut commands: Commands,
     mut tracker: Local<Tracker>,
+    mut clips_in_memory: ResMut<Assets<crate::pcm_audio::PcmClip>>,
 ) {
     let Some(mut bank) = bank else { return };
     let dt = time.delta_secs();
@@ -416,29 +440,29 @@ fn update(
         if let Some(previous) = tracker.state.filter(|&previous| previous != state) {
             if airborne(state) && (rolling(previous) || previous.is_grind()) {
                 let under = touched.unwrap_or(surface);
-                bank.play(&mut commands, if matches!(under, "roll_wood" | "roll_dirt" | "roll_grass") { "pop_wood" } else { "pop_hard" }, 1.0);
-                bank.play(&mut commands, "ollie_rattle", 0.4 + 0.6 * intensity);
-                bank.play(&mut commands, "cloth", 0.5 + 0.5 * intensity);
+                bank.play(&mut commands, &mut clips_in_memory, if matches!(under, "roll_wood" | "roll_dirt" | "roll_grass") { "pop_wood" } else { "pop_hard" }, 1.0);
+                bank.play(&mut commands, &mut clips_in_memory, "ollie_rattle", 0.4 + 0.6 * intensity);
+                bank.play(&mut commands, &mut clips_in_memory, "cloth", 0.5 + 0.5 * intensity);
                 tracker.wheel_spin = intensity;
             } else if airborne(previous) && rolling(state) {
                 // Harder landings are louder; 6 m/s downward is a big drop.
                 let gain = (0.45 + tracker.fall_speed / 6.0).min(1.3);
                 let under = touched.unwrap_or(surface);
                 match under {
-                    "roll_wood" => bank.play(&mut commands, "land_wood", gain),
-                    "roll_grass" | "roll_dirt" => bank.play(&mut commands, "land_wood", gain * 0.5),
+                    "roll_wood" => bank.play(&mut commands, &mut clips_in_memory, "land_wood", gain),
+                    "roll_grass" | "roll_dirt" => bank.play(&mut commands, &mut clips_in_memory, "land_wood", gain * 0.5),
                     _ => {
                         // Street and sidewalk: a slap and the tail's clack, not a ramp boom.
-                        bank.play(&mut commands, "land_hard", gain * 0.8);
-                        bank.play(&mut commands, "pop_hard", gain * 0.5);
+                        bank.play(&mut commands, &mut clips_in_memory, "land_hard", gain * 0.8);
+                        bank.play(&mut commands, &mut clips_in_memory, "pop_hard", gain * 0.5);
                     }
                 }
                 // Metal rings under the thunk.
-                if under == "roll_metal" { bank.play(&mut commands, "body_metal", gain * 0.4); }
+                if under == "roll_metal" { bank.play(&mut commands, &mut clips_in_memory, "body_metal", gain * 0.4); }
                 // Some landings flex the deck enough to squeak.
-                if tracker.fall_speed > 3.0 && bank.random() < 0.5 { bank.play(&mut commands, "squeak", 0.6); }
+                if tracker.fall_speed > 3.0 && bank.random() < 0.5 { bank.play(&mut commands, &mut clips_in_memory, "squeak", 0.6); }
             } else if state.is_grind() && !previous.is_grind() {
-                bank.play(&mut commands, "grind_enter", 1.0);
+                bank.play(&mut commands, &mut clips_in_memory, "grind_enter", 1.0);
             }
             // No generic bail sound: a wipeout is heard only through the body
             // hitting things (below).
@@ -446,8 +470,8 @@ fn update(
         // Flip tricks: a short swish (and cloth) as the board starts spinning.
         let spinning = airborne(state) && spin > FLIP_SPIN;
         if spinning && !tracker.spinning && !physics.board_wiping_out {
-            bank.play(&mut commands, "flip_spin", (0.4 + (spin - FLIP_SPIN) / 30.0).min(0.9));
-            bank.play(&mut commands, "cloth", 0.6);
+            bank.play(&mut commands, &mut clips_in_memory, "flip_spin", (0.4 + (spin - FLIP_SPIN) / 30.0).min(0.9));
+            bank.play(&mut commands, &mut clips_in_memory, "cloth", 0.6);
         }
         // Big drops: the deep whoosh of falling fast, once per air, just
         // before the landing (retail's pre-land whoosh class).
@@ -455,7 +479,7 @@ fn update(
             tracker.drop_whoosh = false;
         } else if !tracker.drop_whoosh && tracker.fall_speed > DROP_WHOOSH_SPEED {
             tracker.drop_whoosh = true;
-            bank.play(&mut commands, "flip", (0.5 + (tracker.fall_speed - DROP_WHOOSH_SPEED) / 8.0).min(1.2));
+            bank.play(&mut commands, &mut clips_in_memory, "flip", (0.5 + (tracker.fall_speed - DROP_WHOOSH_SPEED) / 8.0).min(1.2));
         }
         // A swish every full turn of the board while it keeps spinning.
         if !airborne(state) { tracker.flip_swishes = 0; }
@@ -464,7 +488,7 @@ fn update(
             if tracker.flip_turn > std::f32::consts::TAU {
                 tracker.flip_swishes += 1;
                 tracker.flip_turn -= std::f32::consts::TAU;
-                bank.play(&mut commands, "flip_spin", (0.35 + (spin - FLIP_SPIN) / 40.0).min(0.8));
+                bank.play(&mut commands, &mut clips_in_memory, "flip_spin", (0.35 + (spin - FLIP_SPIN) / 40.0).min(0.8));
             }
         } else {
             tracker.flip_turn = 0.0;
@@ -480,7 +504,7 @@ fn update(
                     "roll_grass" | "roll_dirt" => "skid_soft",
                     _ => "skid_rough",
                 };
-                bank.play(&mut commands, skid, 0.4 + 0.6 * intensity);
+                bank.play(&mut commands, &mut clips_in_memory, skid, 0.4 + 0.6 * intensity);
             }
         }
         // Body impacts: any ragdoll part that suddenly loses speed along the
@@ -533,7 +557,7 @@ fn update(
             tracker.scrape_timer -= dt;
             if tracker.scrape_timer <= 0.0 {
                 tracker.scrape_timer = 0.25 + 0.3 * bank.random();
-                bank.play(&mut commands, "body_scrape", ((tracker.body_slide - 1.5) / 4.0).clamp(0.2, 0.9));
+                bank.play(&mut commands, &mut clips_in_memory, "body_scrape", ((tracker.body_slide - 1.5) / 4.0).clamp(0.2, 0.9));
             }
         }
         tracker.body_velocities = body.iter().map(|b| { let v = b.rates.linear_velocity; Vec3::new(v.x, v.y, v.z) }).collect();
@@ -545,18 +569,18 @@ fn update(
                 else if hardest > 4.0 { ("body_medium", 1.0) } else { ("body_light", 0.6 + hardest / 10.0) };
             // Soft ground muffles the hit a step down.
             let name = if soft && name == "body_heavy" { "body_medium" } else if soft { "body_light" } else { name };
-            bank.play(&mut commands, name, if soft { gain * 0.7 } else { gain });
+            bank.play(&mut commands, &mut clips_in_memory, name, if soft { gain * 0.7 } else { gain });
             if family == "roll_metal" {
-                bank.play(&mut commands, "body_metal", (0.5 + hardest / 10.0).min(1.2));
+                bank.play(&mut commands, &mut clips_in_memory, "body_metal", (0.5 + hardest / 10.0).min(1.2));
             }
             // Hard hits get the meat; soft ground muffles it.
             if hardest > 3.0 {
                 let meat = (0.4 + (hardest - 3.0) / 8.0).min(1.0);
-                bank.play(&mut commands, "body_flesh", if soft { meat * 0.6 } else { meat });
+                bank.play(&mut commands, &mut clips_in_memory, "body_flesh", if soft { meat * 0.6 } else { meat });
             }
             // Brutal slams on hard ground crack bones now and then.
             if hardest > BONE_SPEED && !soft && tracker.bone_cooldown <= 0.0 && bank.random() < 0.6 {
-                bank.play(&mut commands, "body_bone", (0.6 + (hardest - BONE_SPEED) / 8.0).min(1.1));
+                bank.play(&mut commands, &mut clips_in_memory, "body_bone", (0.6 + (hardest - BONE_SPEED) / 8.0).min(1.1));
                 tracker.bone_cooldown = 1.2;
             }
             if std::env::var("SKATE_DEBUG_AUDIO").is_ok() {
@@ -584,20 +608,20 @@ fn update(
         let wood = |f: &str| matches!(f, "roll_wood" | "roll_dirt" | "roll_grass");
         if !physics.board_wiping_out && rolling(state) && drag > 1.0 && tracker.drag_timer <= 0.0 {
             tracker.drag_timer = 0.09;
-            bank.play(&mut commands, if wood(surface) { "pop_wood" } else { "pop_hard" }, (0.25 + drag / 12.0).min(0.6));
+            bank.play(&mut commands, &mut clips_in_memory, if wood(surface) { "pop_wood" } else { "pop_hard" }, (0.25 + drag / 12.0).min(0.6));
         }
         if knock > 1.2 && tracker.drag_timer <= 0.0 {
             tracker.drag_timer = 0.12;
             let gain = (knock / 6.0).clamp(0.2, 0.8);
-            bank.play(&mut commands, if wood(knock_surface) { "land_wood" } else { "land_hard" }, gain);
-            bank.play(&mut commands, "ollie_rattle", gain);
+            bank.play(&mut commands, &mut clips_in_memory, if wood(knock_surface) { "land_wood" } else { "land_hard" }, gain);
+            bank.play(&mut commands, &mut clips_in_memory, "ollie_rattle", gain);
         }
         // Pavement seams: a clack every joint rolled over on concrete.
         if rolling(state) && matches!(surface, "roll_smooth" | "roll_rough") {
             tracker.seam_travel += speed * dt;
             if tracker.seam_travel > SEAM_SPACING * (0.7 + 0.6 * bank.random()) {
                 tracker.seam_travel = 0.0;
-                bank.play(&mut commands, "seam", 0.4 + 0.6 * intensity);
+                bank.play(&mut commands, &mut clips_in_memory, "seam", 0.4 + 0.6 * intensity);
             }
         } else {
             tracker.seam_travel = 0.0;
@@ -614,7 +638,7 @@ fn update(
                 let stride = if pace > 3.0 { 1.3 } else { 0.75 };
                 if tracker.step_travel > stride {
                     tracker.step_travel = 0.0;
-                    bank.play(&mut commands, "footstep", if pace > 3.0 { 0.9 } else { 0.6 });
+                    bank.play(&mut commands, &mut clips_in_memory, "footstep", if pace > 3.0 { 0.9 } else { 0.6 });
                 }
             }
         } else {
@@ -663,7 +687,7 @@ fn update(
             if speed > 0.1 {
                 let start = std::time::Duration::from_secs_f32((1.0 - speed.min(1.0)) * SPIN_SPAN);
                 if std::env::var("SKATE_DEBUG_AUDIO").is_ok() { info!("WHEEL_SPIN {kind} from {start:?}"); }
-                if let Some(entity) = bank.play_from(&mut commands, kind, 0.9, start) {
+                if let Some(entity) = bank.play_from(&mut commands, &mut clips_in_memory, kind, 0.9, start) {
                     tracker.spin = Some((entity, kind));
                 }
             }

@@ -28,6 +28,8 @@ gilrs = "0.11"
 [dependencies]
 bevy = { workspace = true, features = ["jpeg", "trace", "debug"] }
 tracing-log = "0.2"
+# Same version and codec as bevy_audio's, to decode clips into memory (pcm_audio.rs).
+rodio = { version = "0.20.1", default-features = false, features = ["vorbis"] }
 skate-core.workspace = true
 skate-data.workspace = true
 half = "=2.7.1"

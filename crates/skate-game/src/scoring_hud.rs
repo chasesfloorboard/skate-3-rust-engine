@@ -60,6 +60,24 @@ struct Slot {
     entity: Entity,
     mesh: Handle<Mesh>,
     material: Handle<HudMaterial>,
+    /// What the slot last drew and whether it is shown: rebuilding every
+    /// slot's mesh and material each frame re-uploaded the whole HUD per frame.
+    signature: u64,
+    shown: bool,
+}
+
+/// Hash of everything a draw puts on screen.
+fn signature(draw: &apt_scene::Draw) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    draw.texture.hash(&mut hasher);
+    for v in &draw.vertices {
+        v.position.map(f32::to_bits).hash(&mut hasher);
+        v.uv.map(f32::to_bits).hash(&mut hasher);
+    }
+    draw.multiply.map(f32::to_bits).hash(&mut hasher);
+    draw.add.map(f32::to_bits).hash(&mut hasher);
+    hasher.finish()
 }
 #[derive(Resource)]
 struct Hud {
@@ -420,6 +438,16 @@ fn render(
         let Some(texture) = hud.textures.get(&draw.texture).cloned() else {
             continue;
         };
+        let key = signature(draw);
+        if let Some(slot) = hud.slots.get_mut(index) {
+            if slot.signature == key {
+                if !slot.shown {
+                    slot.shown = true;
+                    commands.entity(slot.entity).insert(Visibility::Visible);
+                }
+                continue;
+            }
+        }
         let mut mesh = Mesh::new(
             PrimitiveTopology::TriangleList,
             RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
@@ -461,19 +489,29 @@ fn render(
                 entity,
                 mesh,
                 material,
+                signature: key,
+                shown: true,
             });
         } else {
-            let slot = &hud.slots[index];
+            let slot = &mut hud.slots[index];
+            slot.signature = key;
             if let Some(old) = meshes.get_mut(&slot.mesh) {
                 *old = mesh;
             }
             if let Some(old) = materials.get_mut(&slot.material) {
                 *old = material;
             }
-            commands.entity(slot.entity).insert(Visibility::Visible);
+            if !slot.shown {
+                slot.shown = true;
+                commands.entity(slot.entity).insert(Visibility::Visible);
+            }
         }
     }
-    for slot in &hud.slots[draws.len()..] {
-        commands.entity(slot.entity).insert(Visibility::Hidden);
+    let drawn = draws.len();
+    for slot in hud.slots.iter_mut().skip(drawn) {
+        if slot.shown {
+            slot.shown = false;
+            commands.entity(slot.entity).insert(Visibility::Hidden);
+        }
     }
 }
