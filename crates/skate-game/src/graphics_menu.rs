@@ -793,6 +793,12 @@ fn apply_shadows(
         let player_only = layers.is_some_and(|l| l.intersects(&bevy::camera::visibility::RenderLayers::layer(28))
             && !l.intersects(&bevy::camera::visibility::RenderLayers::layer(0)));
         if tier > 0 && !player_only {
+            // Retail maps' world-caster light only shades characters and
+            // props (the world's own shadows are baked), and those are near
+            // the player: every cascade re-tests and redraws the whole map, so
+            // it stops at two cascades and 40 m.
+            let character_only = light.illuminance == 0.0 && !light.affects_lightmapped_mesh_diffuse;
+            let (cascades, distance) = if character_only { (cascades.min(2), distance.min(40.0)) } else { (cascades, distance) };
             *config = bevy::light::CascadeShadowConfigBuilder {
                 num_cascades: cascades,
                 maximum_distance: distance,
