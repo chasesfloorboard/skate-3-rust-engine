@@ -1,6 +1,7 @@
 #define_import_path skate_character_lighting
 #import bevy_pbr::mesh_view_bindings as frame
 #import bevy_pbr::shadows::fetch_directional_shadow
+#import skate_dynamic_lights::lamp_light
 struct CharacterParams {
     light: vec4<f32>, tint: vec4<f32>, options: vec4<f32>,
     rows: array<vec4<f32>,9>, sh: array<vec4<f32>,9>,
@@ -36,7 +37,9 @@ fn shade_character(p: CharacterParams, vn: vec3<f32>, position: vec4<f32>, d: ve
         let hl=p.rows[1].rgb*(saturate(ndl*0.75+0.25)+p.rows[5].w*0.25)
             +p.rows[6].rgb*fres*saturate(ndl*1.75+0.25);
         if alpha<p.options.z { discard; }
-        return vec4<f32>(d*hl*p.light.w,alpha*p.tint.a);
+        // Street lamps and floodlights (night amount in sh[0].w).
+        let lamp=lamp_light(d,position.xyz,vn,p.sh[0].w,p.light.w);
+        return vec4<f32>((d*hl+lamp)*p.light.w,alpha*p.tint.a);
     }
     let s=p.rows[7].y;
     let v=vn*s;
@@ -65,5 +68,7 @@ fn shade_character(p: CharacterParams, vn: vec3<f32>, position: vec4<f32>, d: ve
     let rs=pow(saturate(dot(vd,-rr)),p.rows[3].w)*rfres;
     let spec=saturate((ks*p.rows[2].rgb*kfres+rs*p.rows[3].rgb)*smask*smask);
     if alpha<p.options.z { discard; }
-    return vec4<f32>((d*lit+spec)*p.rows[0].y*p.light.w,alpha*p.tint.a);
+    // Street lamps and floodlights (night amount in sh[0].w).
+    let lamp=lamp_light(d,position.xyz,vn,p.sh[0].w,p.rows[0].y*p.light.w);
+    return vec4<f32>((d*lit+lamp+spec)*p.rows[0].y*p.light.w,alpha*p.tint.a);
 }

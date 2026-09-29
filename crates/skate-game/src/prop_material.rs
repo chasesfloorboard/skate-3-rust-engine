@@ -18,7 +18,8 @@ pub(crate) struct PropMaterial {
     pub diffuse: Option<Handle<Image>>,
     #[storage(3, read_only)]
     pub frame: Handle<bevy::render::storage::ShaderStorageBuffer>,
-    /// x: 1 for metal, which reflects `matcap` (a sphere map) by view normal.
+    /// x: 1 for metal, which reflects `matcap` (a sphere map) by view normal;
+    /// y: 1 for alpha-blended, whose alpha cannot carry the lamp share.
     #[uniform(4)]
     pub shine: Vec4,
     #[texture(5)]
@@ -41,10 +42,18 @@ impl Material for PropMaterial {
     }
 }
 
+/// Keeps the imported dynamic_lights.wgsl module loaded.
+#[derive(Resource)]
+struct DynamicLightsShader(#[allow(dead_code)] Handle<Shader>);
+
 pub(crate) struct PropMaterialPlugin;
 impl Plugin for PropMaterialPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "prop_material.wgsl");
+        // Shared lamp lighting (characters, props), imported by path.
+        embedded_asset!(app, "dynamic_lights.wgsl");
+        let lights: Handle<Shader> = bevy::asset::load_embedded_asset!(app.world().resource::<AssetServer>(), "dynamic_lights.wgsl");
+        app.insert_resource(DynamicLightsShader(lights));
         app.add_plugins(MaterialPlugin::<PropMaterial>::default())
             .add_systems(Update, adopt);
     }
@@ -82,7 +91,8 @@ fn adopt(
                 frame: crate::retail_render::FRAME_BUFFER,
                 // Metallic materials carry their reflection sphere map in the
                 // emissive slot (tools/mk8_to_mixamo.py).
-                shine: Vec4::new(if source.metallic > 0.5 && source.emissive_texture.is_some() { 1. } else { 0. }, 0., 0., 0.),
+                shine: Vec4::new(if source.metallic > 0.5 && source.emissive_texture.is_some() { 1. } else { 0. },
+                                 if matches!(alpha, AlphaMode::Blend | AlphaMode::Premultiplied | AlphaMode::Add) { 1. } else { 0. }, 0., 0.),
                 matcap: source.emissive_texture.clone().filter(|_| source.metallic > 0.5),
                 alpha,
             })

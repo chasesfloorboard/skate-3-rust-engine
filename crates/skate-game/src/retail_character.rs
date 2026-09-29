@@ -349,10 +349,13 @@ fn update(
         .default_sh
         .map(|v| Vec3::from_array(v).extend(0.));
     let sh = lighting.probes.sample(root.translation, fallback);
-    let displayed = lighting.display_sh.map_or(sh, |old| {
+    let mut displayed = lighting.display_sh.map_or(sh, |old| {
         let weight = 1. - (-time.delta_secs().clamp(0., 0.05) / 0.35).exp();
         std::array::from_fn(|i| old[i].lerp(sh[i], weight))
     });
+    // The night amount rides in the unused w for the lamp lighting
+    // (dynamic_lights.wgsl): lamps are pre-divided by the night grade.
+    displayed[0].w = shadow.1.z;
     publish_sh(&mut materials, displayed, &mut changed);
     for (_, material) in customiser.iter_mut() {
         if material.extension.retail.tint.w == 0. { continue; }
