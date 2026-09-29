@@ -79,6 +79,9 @@ def soles(path):
     return (min(sole) if sole else None), min(low), foot_y
 
 
+# Joints that spin freely (as rings) rather than swing, per racer.
+SPIN = {'Wendy': ('seleeve',)}
+
 # Hair under the cap for capped racers other than Mario (bald, with a comb-over).
 HAIR = {'Luigi': '3a2010', 'Wario': '2e1a0e', 'Waluigi': '241a26'}
 
@@ -103,6 +106,7 @@ def main():
     parser.add_argument('--relative', type=float, default=1.17,
                         help="without --height: scale of the model's own MK8 size (1.17 makes Mario 1.35 m, babies small)")
     parser.add_argument('--library', type=Path, default=None)
+    parser.add_argument('--game', default='Mario Kart 8', help='game shown in the customiser Model page')
     parser.add_argument('--reference', type=Path, default=None)
     args = parser.parse_args()
     library = args.library or default_library()
@@ -113,9 +117,18 @@ def main():
         temp = Path(temp)
         mixamo = temp / 'source.glb'
         hair = ['--hair', HAIR[args.name]] if args.name in HAIR else []
-        subprocess.run([sys.executable, str(HERE / 'mk8_to_mixamo.py'), str(args.model), str(mixamo), *hair], check=True)
+        if args.model.suffix.lower() == '.smd':
+            # Odyssey rips (tools/smd_to_mixamo.py): body plus the first hand
+            # pose and eyebrows (eyelids are blink shapes).
+            stem = args.model.stem
+            parts = [p for suffix in ('_LHand1', '_RHand1', '_Eyebrow1')
+                     for p in args.model.parent.glob(f'{stem}{suffix}.[Ss][Mm][Dd]')]
+            subprocess.run([sys.executable, str(HERE / 'smd_to_mixamo.py'), str(args.model), str(mixamo),
+                            '--parts', *map(str, parts)], check=True)
+        else:
+            subprocess.run([sys.executable, str(HERE / 'mk8_to_mixamo.py'), str(args.model), str(mixamo), *hair], check=True)
         if args.height is None:
-            args.height = HEIGHTS.get(args.name)
+            args.height = HEIGHTS.get(args.name, HEIGHTS.get(args.name.split(' (')[0]))
         if args.height is None:
             # MK8 racers share one scale: keep their relative sizes.
             from glb import Document
@@ -130,6 +143,8 @@ def main():
         staging = temp / 'entry'
         staging.mkdir()
         # No board: the player's own customised board stays under the character.
+        import mk8_convert
+        mk8_convert.SPIN = set(SPIN.get(args.name, ()))
         report = convert_glb(mixamo, reference, staging / 'character.glb', include_board=False, keep_height=args.height)
         sole, _, foot_y = soles(staging / 'character.glb')
         if sole is not None:
@@ -137,7 +152,7 @@ def main():
         (staging / 'report.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
         mixamo.replace(staging / 'source.glb')
         thumbnail(staging / 'character.glb', staging / 'preview.png')
-        manifest = {'version': 1, 'id': digest, 'name': args.name[:64],
+        manifest = {'version': 1, 'id': digest, 'name': args.name[:64], 'game': args.game,
                     'source_sha256': sha(staging / 'source.glb'), 'reference_sha256': sha(reference),
                     'created_utc': datetime.now(timezone.utc).isoformat(),
                     'proportions': {'hips_ratio': report['hips_ratio'], 'leg_ratio': report['leg_ratio'],

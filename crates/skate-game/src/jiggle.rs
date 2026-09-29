@@ -32,6 +32,8 @@ struct Jiggle {
     gravity: f32,
     limit: f32,
     cap: bool,
+    /// Rings (JIGGLE_SPIN_): turn about their bone, driven by its motion.
+    spin: Option<(Vec3, f32, f32)>,
     /// Tip position and velocity in the world.
     position: Vec3,
     velocity: Vec3,
@@ -76,6 +78,8 @@ fn adopt(
         commands.entity(entity).insert(Jiggle {
             rest: *transform, tip, depth, stiffness, damping, gravity, limit,
             cap: name.as_str().to_ascii_lowercase().contains("cap"),
+            // Spin axis: along the bone the ring sits on (its offset from it).
+            spin: name.as_str().starts_with("JIGGLE_SPIN_").then(|| (transform.translation.try_normalize().unwrap_or(Vec3::Y), 0.0, 0.0)),
             position: Vec3::ZERO, velocity: Vec3::ZERO, ready: false,
             lift: 0.0, loose: None, floor: 0.0,
         });
@@ -186,6 +190,15 @@ fn simulate(
         let world_rotation = swing * Quat::from_affine3(&rest_world);
         let mut local = j.rest;
         local.rotation = (parent_global.rotation().inverse() * world_rotation).normalize();
+        let flick = j.velocity.length();
+        if let Some((axis, angle, rate)) = j.spin.as_mut() {
+            // The arm's swing flicks the ring round; friction slows it again.
+            *rate += flick * 6.0 * dt;
+            *rate *= (1.0 - 1.5 * dt).max(0.0);
+            *rate = rate.clamp(0.4, 25.0);
+            *angle = (*angle + *rate * dt) % std::f32::consts::TAU;
+            local.rotation = (Quat::from_axis_angle(*axis, *angle) * local.rotation).normalize();
+        }
         if j.cap {
             local.translation += parent_global.rotation().inverse() * Vec3::Y * j.lift / parent_global.scale().y.max(1e-3);
         }

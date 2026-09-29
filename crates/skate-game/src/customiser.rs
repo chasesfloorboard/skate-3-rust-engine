@@ -893,11 +893,20 @@ fn interact(
         if let Some(models) = models.as_ref() {
             let (list, active) = models.choices();
             let mark = |on: bool, label: &str| if on { format!("{label}  (in use)") } else { label.to_owned() };
-            let mut entries = vec![Entry { label: mark(active.is_none(), "Your skater"), action: Some("model:".into()), ..default() }];
-            entries.extend(list.into_iter().map(|(id, name)| Entry {
-                label: mark(active == Some(id.as_str()), &name), action: Some(format!("model:{id}")), ..default()
-            }));
-            extras.push(Entry { label: "Model".into(), children: entries, ..default() });
+            let own = || Entry { label: mark(active.is_none(), "Your skater"), action: Some("model:".into()), ..default() };
+            let item = |(id, name, _): &(String, String, String)| Entry {
+                label: mark(active == Some(id.as_str()), name), action: Some(format!("model:{id}")), ..default()
+            };
+            // Sorted by game: every character, then one page per game.
+            let mut pages = vec![Entry { label: "All".into(), children: std::iter::once(own()).chain(list.iter().map(item)).collect(), ..default() },
+                Entry { label: "Skate 3".into(), children: vec![own()], ..default() }];
+            let mut games: Vec<String> = list.iter().map(|(_, _, game)| game.clone()).collect();
+            games.sort_by_key(|g| (g == "Custom", g.clone()));
+            games.dedup();
+            for game in games {
+                pages.push(Entry { label: game.clone(), children: list.iter().filter(|(_, _, g)| *g == game).map(item).collect(), ..default() });
+            }
+            extras.push(Entry { label: "Model".into(), children: pages, ..default() });
         }
         state.index = menu(&parts.library, extras);
         wheel.clear();

@@ -23,13 +23,20 @@ BOARD = {'SKATEBOARD_ROOT', 'TRUCK_FRONT', 'TRUCK_BACK', 'LEFT_WHEELFRONT',
 
 
 # Secondary joints kept (as JIGGLE_<name>) for the engine's spring bones:
-# hair, tails, skirts, ears, caps, mustaches, sleeves, tongues, ribbons.
-JIGGLE = ('hair', 'tail', 'skirt', 'ear', 'cap', 'mustache', 'sleeve', 'seleeve', 'tongue', 'ribbon', 'ponytail')
+# hair, tails, skirts, ears, caps, mustaches, sleeves, tongues, ribbons, bags.
+JIGGLE = ('hair', 'tail', 'skirt', 'ear', 'cap', 'mustache', 'sleeve', 'seleeve', 'tongue', 'ribbon', 'ponytail', 'bag')
+
+
+# Jiggle joints that spin freely about their bone (Wendy's arm rings), set by
+# the caller per character: JIGGLE_SPIN_<name>.
+SPIN = set()
 
 
 def jiggle_name(name):
     base = name.rsplit(':', 1)[-1]
-    return 'JIGGLE_' + base if any(k in base.lower() for k in JIGGLE) and not base.lower().startswith('mixamorig') else None
+    if not any(k in base.lower() for k in JIGGLE) or base.lower().startswith('mixamorig'):
+        return None
+    return ('JIGGLE_SPIN_' if any(k in base.lower() for k in SPIN) else 'JIGGLE_') + base
 
 
 def sha(path):

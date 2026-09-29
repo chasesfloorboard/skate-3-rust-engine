@@ -31,6 +31,9 @@ pub(crate) struct Entry {
     /// rotations on its bone lengths, hips lowered by this ratio.
     #[serde(default)]
     proportions: Option<Proportions>,
+    /// Game the character comes from (manifest "game"; imports are Custom).
+    #[serde(default)]
+    game: Option<String>,
     #[serde(skip)]
     asset_prefix: String,
 }
@@ -118,10 +121,11 @@ pub(crate) struct CustomModels {
     dirty: bool,
 }
 impl CustomModels {
-    /// (id, name) of every character in the library, for the customiser's
-    /// Model page, and the one in use.
-    pub(crate) fn choices(&self) -> (Vec<(String, String)>, Option<&str>) {
-        let mut list: Vec<_> = self.entries.iter().map(|e| (e.id.clone(), e.name.clone())).collect();
+    /// (id, name, game) of every character in the library, for the
+    /// customiser's Model page, and the one in use.
+    pub(crate) fn choices(&self) -> (Vec<(String, String, String)>, Option<&str>) {
+        let mut list: Vec<_> = self.entries.iter()
+            .map(|e| (e.id.clone(), e.name.clone(), e.game.clone().unwrap_or_else(|| "Custom".into()))).collect();
         list.sort_by(|a, b| a.1.to_ascii_lowercase().cmp(&b.1.to_ascii_lowercase()));
         (list, self.active.as_deref())
     }
