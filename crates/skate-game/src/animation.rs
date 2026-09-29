@@ -9,18 +9,207 @@ use skate_core::animation::output::NativeMatrix;
 pub(crate) struct AnimationStatus {
     pub ready: bool,
     bindings: Vec<BoneBinding>,
+    /// Characters that keep their own proportions (custom_models manifest
+    /// "proportions"): hip height ratio to the stock rig. Stock animation
+    /// rotations then play on the character's own bone lengths.
+    pub keep: Option<Keep>,
+    feet: Option<[usize; 2]>,
+    board: Option<usize>,
+    /// (hand, its *_REPARENTED grip on the board) for left and right.
+    hands: Option<[(usize, usize); 2]>,
+    /// (upper leg, knee, foot) for left and right: kept-proportion legs
+    /// reach for the stock feet with two-bone IK.
+    legs: Option<[[usize; 3]; 2]>,
+}
+/// Kept-proportion character (custom_models manifest "proportions").
+#[derive(Clone, Copy)]
+pub(crate) struct Keep {
+    /// Hips-to-ankle height against the stock rig's.
+    pub leg: f32,
+    /// Ankle joint height over the soles, the character's and the stock rig's.
+    pub ankle: f32,
+    pub stock_ankle: f32,
 }
 struct BoneBinding {
     entity: Entity,
     bone: usize,
     parent_bone: Option<usize>,
+    /// The joint's bind offset from its parent, and its role.
+    rest: Vec3,
+    role: Role,
+}
+#[derive(Clone, Copy, PartialEq)]
+enum Role { Body, Hips, Board }
+fn role(name: &str) -> Role {
+    let name = name.to_ascii_uppercase();
+    if name == "HIPS" { Role::Hips }
+    else if name.starts_with("SKATEBOARD") || name.starts_with("TRUCK") || name.contains("WHEEL") || name.ends_with("_REPARENTED") { Role::Board }
+    else { Role::Body }
+}
+fn hands(names: &[String]) -> Option<[(usize, usize); 2]> {
+    let find = |n: &str| names.iter().position(|b| b.eq_ignore_ascii_case(n));
+    Some([(find("LEFTHAND")?, find("LEFTHAND_REPARENTED")?), (find("RIGHTHAND")?, find("RIGHTHAND_REPARENTED")?)])
+}
+fn legs(names: &[String]) -> Option<[[usize; 3]; 2]> {
+    let find = |n: &str| names.iter().position(|b| b.eq_ignore_ascii_case(n));
+    Some([[find("LEFTUPLEG")?, find("LEFTLEG")?, find("LEFTFOOT")?], [find("RIGHTUPLEG")?, find("RIGHTLEG")?, find("RIGHTFOOT")?]])
+}
+fn feet(names: &[String]) -> Option<[usize; 2]> {
+    let find = |n: &str| names.iter().position(|b| b.eq_ignore_ascii_case(n));
+    Some([find("LEFTFOOT")?, find("RIGHTFOOT")?])
 }
 impl AnimationStatus {
+    /// Keep the stock board joints (not those under `skip`) animating under a
+    /// character that rides the player's own customised board.
+    pub(crate) fn carry_board(&mut self, from: &AnimationStatus, names: &[String], skip: impl Fn(Entity) -> bool) {
+        for b in &from.bindings {
+            let board = names.get(b.bone).is_some_and(|n| role(n) == Role::Board);
+            if board && !skip(b.entity) && !self.bindings.iter().any(|o| o.entity == b.entity) {
+                self.bindings.push(BoneBinding { entity: b.entity, bone: b.bone, parent_bone: b.parent_bone, rest: b.rest, role: Role::Board });
+            }
+        }
+    }
+    /// Kept-proportion characters: body joints keep their own bone offsets,
+    /// the hips drop with the leg-length ratio above the animated feet' sole
+    /// plane, the board follows the animation exactly.
+    fn adjust(&self, b: &BoneBinding, t: Transform, global: impl Fn(usize) -> Option<Mat4>) -> Transform {
+        self.adjust_with(b, t, global, false)
+    }
+    /// `seated`: hips stay where the pose puts them (a kart seat), rather
+    /// than following the feet.
+    fn adjust_with(&self, b: &BoneBinding, mut t: Transform, global: impl Fn(usize) -> Option<Mat4>, seated: bool) -> Transform {
+        let Some(keep) = self.keep else { return t };
+        match b.role {
+            Role::Body => {
+                t.translation = b.rest;
+                if !seated {
+                    if let Some(rotation) = self.leg_ik(b.bone, &|i| global(i)) {
+                        t.rotation = rotation;
+                    }
+                }
+            }
+            Role::Hips if seated => {}
+            Role::Hips => {
+                // Hips follow the animated feet with the character's leg length,
+                // in every direction (leans, tucks, flips), and its soles sit
+                // where the skater's do.
+                // Anchor: the board when it is under the character (a pushing
+                // foot swinging along the ground must not drag the body), the
+                // feet otherwise; at the lower foot's height.
+                let feet = self.feet.and_then(|[l, r]| Some((global(l)?.w_axis.truncate(), global(r)?.w_axis.truncate())));
+                if let Some((left, right)) = feet {
+                    let mut anchor = (left + right) * 0.5;
+                    anchor.y = left.y.min(right.y);
+                    if let Some(board) = self.board.and_then(|b| global(b)).map(|m| m.w_axis.truncate()) {
+                        if board.with_y(0.0).distance(t.translation.with_y(0.0)) < 0.6 {
+                            anchor = Vec3::new(board.x, anchor.y, board.z);
+                        }
+                    }
+                    let base = anchor + Vec3::Y * (keep.ankle - keep.stock_ankle);
+                    t.translation = base + (t.translation - anchor) * keep.leg;
+                }
+            }
+            Role::Board if b.parent_bone.is_none() && !seated => {
+                // A carried board (a hand on its grip point) goes with the
+                // character's own hand rather than where the stock hand is.
+                let Some(hands) = self.hands else { return t };
+                let board = t.to_matrix();
+                // Only off the board: riding, the hand grips track the hands
+                // too, and the deck must stay under the feet.
+                let deck = board.w_axis.truncate();
+                let on_deck = self.feet.is_some_and(|[l, r]| [l, r].iter().any(|&f| global(f).is_some_and(|m| m.w_axis.truncate().distance(deck) < 0.45)));
+                if on_deck { return t; }
+                for (hand, grip) in hands {
+                    let (Some(stock), Some(held)) = (global(hand), global(grip)) else { continue };
+                    let gap = stock.w_axis.truncate().distance(held.w_axis.truncate());
+                    let weight = ((0.2 - gap) / 0.1).clamp(0., 1.);
+                    if weight <= 0. { continue; }
+                    let Some(own) = self.character_global(hand, &|i| global(i), 0) else { continue };
+                    let moved = Transform::from_matrix(own * stock.inverse() * board);
+                    return crate::presentation::blend(t, moved, weight);
+                }
+            }
+            Role::Board => {}
+        }
+        t
+    }
+    /// Two-bone IK for a kept-proportion leg joint (upper leg, knee or foot):
+    /// the character's own leg bends so its ankle reaches the stock ankle
+    /// (raised by the ankle-height difference), keeping the stock knee plane
+    /// and foot orientation. On the board the feet go exactly where the
+    /// stock feet are (on the deck); off it, the stride shrinks with the legs.
+    fn leg_ik(&self, bone: usize, global: &dyn Fn(usize) -> Option<Mat4>) -> Option<Quat> {
+        let keep = self.keep?;
+        let [up, knee, foot] = *self.legs?.iter().find(|l| l.contains(&bone))?;
+        let binding = |i: usize| self.bindings.iter().find(|b| b.bone == i && b.role != Role::Board);
+        let (bu, bk, bf) = (binding(up)?, binding(knee)?, binding(foot)?);
+        let rot = |m: Mat4| m.to_scale_rotation_translation().1;
+        // The character's leg as posed (stock rotations on its own offsets).
+        let parent = self.character_global(bu.parent_bone?, global, 0)?;
+        let local = |b: &BoneBinding| -> Option<Mat4> {
+            let r = rot(global(b.parent_bone?)?.inverse() * global(b.bone)?);
+            Some(Mat4::from_rotation_translation(r, b.rest))
+        };
+        let up_g = parent * local(bu)?;
+        let knee_g = up_g * local(bk)?;
+        let foot_g = knee_g * local(bf)?;
+        let (hip, kn, ankle) = (up_g.w_axis.truncate(), knee_g.w_axis.truncate(), foot_g.w_axis.truncate());
+        // Target: the stock ankle, lifted to this character's ankle height.
+        let (stock_hip, stock_knee, stock_foot) = (global(up)?.w_axis.truncate(), global(knee)?.w_axis.truncate(), global(foot)?);
+        let mut target = stock_foot.w_axis.truncate() + Vec3::Y * (keep.ankle - keep.stock_ankle);
+        let deck = self.board.and_then(|b| global(b)).map(|m| m.w_axis.truncate());
+        let on_deck = deck.is_some_and(|d| stock_foot.w_axis.truncate().distance(d) < 0.45);
+        if !on_deck {
+            // Off the board: the stock stride around the hips, scaled.
+            target = hip + (target - hip) * keep.leg.clamp(0.3, 1.5);
+        }
+        let (a, b) = ((kn - hip).length(), (ankle - kn).length());
+        if a < 1e-4 || b < 1e-4 { return None; }
+        let d = (target - hip).length().clamp((a - b).abs() + 1e-3, a + b - 1e-3);
+        // Knee: open or close the interior angle to reach distance d.
+        let (u, v) = (hip - kn, ankle - kn);
+        let mut n = u.cross(v);
+        if n.length_squared() < 1e-8 { n = (stock_hip - stock_knee).cross(stock_foot.w_axis.truncate() - stock_knee); }
+        let n = n.normalize_or(Vec3::X);
+        let current = u.angle_between(v);
+        let wanted = ((a * a + b * b - d * d) / (2.0 * a * b)).clamp(-1.0, 1.0).acos();
+        let bend = Quat::from_axis_angle(n, wanted - current);
+        let ankle = kn + bend * (ankle - kn);
+        // Hip: swing the whole leg to point at the target.
+        let aim = Quat::from_rotation_arc((ankle - hip).normalize_or(Vec3::NEG_Y), (target - hip).normalize_or(Vec3::NEG_Y));
+        let up_rot = aim * rot(up_g);
+        let knee_rot = aim * bend * rot(knee_g);
+        Some(if bone == up {
+            rot(parent).inverse() * up_rot
+        } else if bone == knee {
+            up_rot.inverse() * knee_rot
+        } else {
+            // The foot keeps the stock foot's orientation.
+            knee_rot.inverse() * rot(stock_foot)
+        })
+    }
+    /// A body joint's placement on the character's own proportions: its
+    /// adjusted local transforms composed up the hierarchy.
+    fn character_global(&self, bone: usize, global: &dyn Fn(usize) -> Option<Mat4>, depth: usize) -> Option<Mat4> {
+        if depth > 64 { return None; }
+        let b = self.bindings.iter().find(|b| b.bone == bone && b.role != Role::Board)?;
+        let pose = global(bone)?;
+        let local = match b.parent_bone {
+            Some(parent) => global(parent)?.inverse() * pose,
+            None => pose,
+        };
+        let local = self.adjust_with(b, Transform::from_matrix(local), global, false).to_matrix();
+        Some(match b.parent_bone {
+            Some(parent) => self.character_global(parent, global, depth + 1)? * local,
+            None => local,
+        })
+    }
     pub(crate) fn pose_transforms(&self, pose:&[Mat4])->Vec<(Entity,Transform)> {
+        let global = |i: usize| pose.get(i).map(|m| *m * render_basis());
         self.bindings.iter().filter_map(|b|{
-            let global=*pose.get(b.bone)?*render_basis();
-            let local=if let Some(parent)=b.parent_bone {(*pose.get(parent)?*render_basis()).inverse()*global} else {global};
-            Some((b.entity,Transform::from_matrix(local)))
+            let global_bone=*pose.get(b.bone)?*render_basis();
+            let local=if let Some(parent)=b.parent_bone {(*pose.get(parent)?*render_basis()).inverse()*global_bone} else {global_bone};
+            Some((b.entity,self.adjust(b, Transform::from_matrix(local), global)))
         }).collect()
     }
 
@@ -45,7 +234,10 @@ impl AnimationStatus {
                 if !parents.iter_ancestors(joint).any(|p| p == root) {
                     return Err("Imported skin refers to a joint outside its scene".into());
                 }
-                let (name, _) = nodes.get(joint).map_err(|_| "Imported joint has no name/transform")?;
+                let (name, rest) = nodes.get(joint).map_err(|_| "Imported joint has no name/transform")?;
+                // Spring bones (hair, tails...) are left to jiggle.rs.
+                if name.as_str().starts_with("JIGGLE_") { continue; }
+                let (rest, joint_role) = (rest.translation, role(name.as_str()));
                 let bone = names.iter().position(|n| n.eq_ignore_ascii_case(name.as_str()))
                     .ok_or_else(|| format!("Unsupported imported bone: {name}"))?;
                 let mut parent_bone = None;
@@ -61,11 +253,12 @@ impl AnimationStatus {
                         }
                     }
                 }
-                bindings.push(BoneBinding { entity: joint, bone, parent_bone });
+                bindings.push(BoneBinding { entity: joint, bone, parent_bone, rest, role: joint_role });
             }
         }
         if bindings.is_empty() { return Err("Imported scene has no skinned character".into()); }
-        Ok(Self { ready: true, bindings })
+        Ok(Self { ready: true, bindings, keep: None, feet: feet(names), hands: hands(names), legs: legs(names),
+            board: names.iter().position(|n| n.eq_ignore_ascii_case("SKATEBOARD_ROOT")) })
     }
 }
 #[cfg(test)]
@@ -180,6 +373,8 @@ fn bind(
                     entity: joint,
                     bone,
                     parent_bone,
+                    rest: Vec3::ZERO,
+                    role: Role::Body,
                 });
             }
             // Bind each visible modular rig, retaining its authored inverse binds.
@@ -228,9 +423,10 @@ fn present(
         // positions: joints retain their hierarchy while limbs turn.
         let local = |snapshot: &crate::presentation::Snapshot| {
             let global = snapshot.bones[binding.bone] * basis;
-            Transform::from_matrix(if let Some(parent) = binding.parent_bone {
+            let t = Transform::from_matrix(if let Some(parent) = binding.parent_bone {
                 (snapshot.bones[parent] * basis).inverse() * global
-            } else { global })
+            } else { global });
+            animation.adjust(binding, t, |i| snapshot.bones.get(i).map(|m| *m * basis))
         };
         if let Ok(mut transform) = nodes.get_mut(binding.entity) {
             *transform = crate::presentation::blend(local(previous), local(current), alpha);
@@ -264,6 +460,8 @@ pub(crate) fn vehicle_pose(world:&mut World, pose:&[Mat4], steering:Option<(&[Ma
      target=crate::presentation::blend(target,Transform::from_matrix(local),weight.clamp(0.,1.));
     }
    }
+   // Kept-proportion characters keep their own bone lengths in the seat too.
+   target=animation.adjust_with(binding,target,|i|pose.get(i).map(|m|*m*basis),true);
    if let Some(mut transform)=world.get_mut::<Transform>(binding.entity) {*transform=target;if Some(binding.bone)==board {transform.scale=Vec3::splat(0.001);}}
   }
  });

@@ -588,7 +588,8 @@ fn receive(mut net: ResMut<Multiplayer>) {
         net.last_metrics = Instant::now();
     }
 }
-fn prepare(net: Res<Multiplayer>, mut physics: ResMut<GamePhysics>, skater: Res<SkaterRuntime>, vehicles: Res<crate::modding::vehicles::Vehicles>) {
+fn prepare(net: Res<Multiplayer>, mut physics: ResMut<GamePhysics>, skater: Res<SkaterRuntime>, vehicles: Res<crate::modding::vehicles::Vehicles>,
+    mut props: ResMut<crate::props::PropColliders>) {
     physics.network_active = net.active();
     physics.network_contacts = 0;
     let mut proxies = std::mem::take(&mut physics.network_proxies);
@@ -608,6 +609,9 @@ fn prepare(net: Res<Multiplayer>, mut physics: ResMut<GamePhysics>, skater: Res<
     for shape in crate::modding::vehicles::network::collision_shapes(&vehicles) {
         proxies.append_vehicle(&shape,&physics,&skater);
     }
+    // Placed benches, bins and dumpsters join the same solver (props.rs).
+    let board = physics.board.bodies()[0].rates.position;
+    crate::props::append_proxies(&mut props, &mut proxies, &physics, &skater, Vec3::new(board.x, board.y, board.z));
     physics.network_proxies = proxies;
 }
 #[derive(Component)]

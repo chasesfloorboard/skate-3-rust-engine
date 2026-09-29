@@ -283,7 +283,9 @@ fn selection(direction: i32, selections: Option<[u32; 4]>) -> Result<u32, String
         3 => 1,
         _ => return Ok(37),
     };
-    Ok(selections.ok_or("CharacterGesture needs the actual skater gesture selections")?[index])
+    // No saved set (should not happen since preferences default it): use
+    // ResetGestureSet's table order rather than stopping the game.
+    Ok(selections.unwrap_or([0, 1, 2, 3])[index])
 }
 fn animation_name(
     direction: i32,

@@ -12,6 +12,10 @@ pub(crate) struct Updater {
 fn helper_command(recover: bool, automatic: bool) -> Result<(Command, PathBuf, PathBuf), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let root = exe.parent().ok_or("Missing program directory")?;
+    // The updater helper and its install transaction are Windows-specific.
+    if cfg!(not(windows)) {
+        return Err("Automatic updates are Windows-only. Unpack the latest Linux package over this folder to update.".into());
+    }
     if !root.join("release.json").is_file() {
         return Err("Updates are available in packaged releases.".into());
     }

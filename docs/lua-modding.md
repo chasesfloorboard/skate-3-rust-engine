@@ -74,9 +74,11 @@ All manifest fields in the minimal example except `settings` are required. `api`
 | `boolean` | JSON/Lua boolean | `default` true or false |
 | `number` | finite JSON/Lua number | required finite `min`, `max`, positive `step`, and default in range |
 | `string` | string without control characters, at most 128 Unicode characters | `default` string |
-| `choice` | string equal to a listed choice | required nonempty `choices`, at most 32 strings, each at most 128 bytes |
+| `choice` | string equal to a listed choice | required nonempty `choices`, at most 64 strings, each at most 128 bytes |
 
 `min`, `max`, `step` and `choices` are optional on other types and have no effect there. Number step controls the menu increment; values need not lie on that increment grid. Saved values are type/range validated. Missing, invalid or renamed values use defaults; removed keys are discarded on loading the current schema. Same-key compatible values survive version changes. Renaming a key intentionally resets it. There is no arbitrary Lua migration callback or persisted mutable Lua state in API 1. Changing the package ID creates a distinct preference identity. Reset delivers one `on_settings` notification per setting in key order. Preferences store `{ "enabled": boolean, "values": {...} }` as `<id>.json` through a sibling temporary file and rename. Save errors appear in the menu; the live edit may already have applied. Never distribute these preference files with a mod. Enable preference and actual running status differ after a fault: the error remains visible and the mod stays stopped until reload, a settled edit, or a future launch.
+
+Choice settings may show a picture in the mod menu. `previews` maps a lookup key to a package-relative `.png` (at most 4096 entries, loaded up to 4 MB), and the image for the current key appears under the setting while it is selected. The key is the setting's own value by default. With `preview_from` (up to 4 setting keys), it is those settings' current values joined with `|`; for example, `"preview_from": ["body", "style"]` looks up `"Pipe Frame|Style 2"`. A key without an entry falls back to shorter prefixes (`"Pipe Frame|Style 2"` falls back to `"Pipe Frame"`); if none match, no picture is shown. The Mario Kart mod uses this for its body, style and wheel choices.
 
 There is no generic gamepad rebinding setting yet. A choice containing supported key names, as an ordinary key-choice schema, is an ordinary validated setting; it does not remap native input.
 

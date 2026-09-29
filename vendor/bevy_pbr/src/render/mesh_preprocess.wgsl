@@ -252,6 +252,10 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
     // hierarchical Z-buffer, then this mesh must be occluded, and we can skip
     // rendering it.
 #ifdef OCCLUSION_CULLING
+    // Skate 3 port: meshes that opt out of frustum culling (animated skater
+    // skins, whose bind-pose AABB does not follow the pose) must not be
+    // occlusion culled with that AABB either, or parts vanish mid-bail.
+    if ((current_input[input_index].flags & MESH_FLAGS_NO_FRUSTUM_CULLING_BIT) == 0u) {
     let aabb_center = mesh_culling_data[input_index].aabb_center.xyz;
     let aabb_half_extents = mesh_culling_data[input_index].aabb_half_extents.xyz;
 
@@ -335,6 +339,7 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
 #endif  // EARLY_PHASE
         // This mesh is culled. Skip it.
         return;
+    }
     }
 #endif  // OCCLUSION_CULLING
 

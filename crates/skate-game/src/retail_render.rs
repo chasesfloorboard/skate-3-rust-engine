@@ -81,6 +81,8 @@ mod exposure;
 #[path = "retail_shadow.rs"]
 mod shadow;
 pub(crate) use shadow::ShadowState;
+/// Shared frame state storage buffer (shadow floor, clock, sun, probe SH).
+pub(crate) const FRAME_BUFFER: Handle<bevy::render::storage::ShaderStorageBuffer> = shadow::BUFFER;
 
 #[derive(Resource)]
 pub(crate) struct RetailScene(pub bool);
@@ -98,7 +100,7 @@ impl RetailScene {
 
 #[path = "retail_sky.rs"]
 mod sky;
-pub(crate) use sky::{spawn_sky, RetailSkyMaterial};
+pub(crate) use sky::{spawn_sky, RetailSkyMaterial, SKY_PRESETS};
 
 #[path = "retail_backdrop.rs"]
 mod backdrop;

@@ -42,14 +42,32 @@ impl Presentation {
 
 fn capture(skater: Res<SkaterRuntime>, camera: Res<CameraRuntime>,
     time: Res<Time<Fixed>>, mut history: ResMut<Presentation>,
-    mut replay: ResMut<crate::replay::Replay>) {
+    mut replay: ResMut<crate::replay::Replay>,
+    props: Option<Res<crate::props::PropColliders>>) {
     if skater.pose_generation == history.generation { return; }
     let Some(frame) = camera.frame else { return; };
+    let root = crate::animation::native_matrix(skater.animated_skeleton.roots.animation_to_world);
+    let mut bones: Vec<Mat4> = skater.render_pose.iter().copied()
+        .map(crate::animation::native_matrix).collect();
+    // Hands onto a held prop (props.rs grip points are world space; the pose
+    // is model space).
+    if let Some((hands, grip)) = props.as_ref().and_then(|p| p.hands.map(|h| (h, p.grip))) {
+        let frames = &skater.animation.evaluator.frames;
+        if let Some(arms) = crate::arm_ik::chains(&frames.bone_names) {
+            let to_model = root.inverse();
+            let targets = hands.map(|h| to_model.transform_point3(h));
+            // Each hand takes the grip point nearer its own shoulder.
+            let near = |arm: [usize; 3], t: Vec3| bones.get(arm[0]).map_or(f32::MAX, |b| b.w_axis.truncate().distance(t));
+            let swap = near(arms[0], targets[0]) + near(arms[1], targets[1])
+                > near(arms[0], targets[1]) + near(arms[1], targets[0]);
+            let (left, right) = if swap { (targets[1], targets[0]) } else { (targets[0], targets[1]) };
+            crate::arm_ik::reach(&mut bones, &frames.parents, arms[0], left, grip);
+            crate::arm_ik::reach(&mut bones, &frames.parents, arms[1], right, grip);
+        }
+    }
     let next = Snapshot {
-        root: Transform::from_matrix(crate::animation::native_matrix(
-            skater.animated_skeleton.roots.animation_to_world)),
-        bones: skater.render_pose.iter().copied()
-            .map(crate::animation::native_matrix).collect(),
+        root: Transform::from_matrix(root),
+        bones,
         camera: camera_transform(frame),
         fov: frame.field_of_view_degrees.to_radians(),
     };

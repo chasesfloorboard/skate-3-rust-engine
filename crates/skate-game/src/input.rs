@@ -30,7 +30,28 @@ impl Plugin for InputPlugin {
         app.init_resource::<ControllerInput>()
             .init_resource::<PublishedTickInput>()
             .add_systems(PreUpdate, poll_controllers.run_if(crate::graphics_menu::gameplay_active))
-            .add_systems(FixedUpdate, publish_actions.in_set(SimulationSet::Input));
+            .add_systems(FixedUpdate, publish_actions.in_set(SimulationSet::Input))
+            .add_systems(Update, cursor_follows_device);
+    }
+}
+
+/// Hides the mouse cursor once the controller is in use and brings it back
+/// as soon as the mouse moves. Only changes in pad state count, so a stick
+/// resting off-centre cannot keep hiding it.
+fn cursor_follows_device(
+    input: Res<ControllerInput>,
+    mouse: Res<bevy::input::mouse::AccumulatedMouseMotion>,
+    mut cursors: Query<&mut bevy::window::CursorOptions, With<bevy::window::PrimaryWindow>>,
+    mut last: Local<controllers::RawInput>,
+) {
+    let pad = input.raw_input();
+    let moved = |a: [f32; 2], b: [f32; 2]| (a[0] - b[0]).abs() + (a[1] - b[1]).abs() > 0.2;
+    let pad_used = pad.buttons != last.buttons || moved(pad.left, last.left) || moved(pad.right, last.right)
+        || moved(pad.triggers, last.triggers);
+    if pad_used { *last = pad; }
+    let visible = if mouse.delta.length_squared() > 1.0 { true } else if pad_used { false } else { return };
+    for mut cursor in &mut cursors {
+        if cursor.visible != visible { cursor.visible = visible; }
     }
 }
 

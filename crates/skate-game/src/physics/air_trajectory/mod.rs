@@ -53,6 +53,11 @@ impl AirTrajectoryRuntime {
         }
         Ok(launched)
     }
+    /// Lend the provider handle out (props.rs updates moving edges in place)
+    /// without clearing the cached nearby grinds, as rebinding would.
+    pub fn grind_world_slot(&mut self) -> &mut Option<Arc<StaticProvider>> {
+        &mut self.grind_world
+    }
     pub fn bind_grind_world(&mut self, provider: Arc<StaticProvider>) {
         self.grind_world = Some(provider);
         self.nearby_grinds.clear();

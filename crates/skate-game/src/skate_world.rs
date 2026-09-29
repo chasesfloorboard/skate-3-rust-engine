@@ -126,7 +126,7 @@ fn decode_native_edges(edges: [u8; 3]) -> Result<(u32, [f32; 3]), String> {
     Ok((flags, cosines))
 }
 
-fn retail_archive(map: &SkateMap) -> Result<Option<&[u8]>, String> {
+pub(crate) fn retail_archive(map: &SkateMap) -> Result<Option<&[u8]>, String> {
     let mut archives = map.extensions.iter().filter(|e| e.tag == *b"RWCM");
     let Some(archive) = archives.next() else {
         return Ok(None);
@@ -202,6 +202,17 @@ fn retail_collision_world(
         "SKATE_RWCM_READY triangles={count} query_clusters={} source=embedded",
         meshes.len()
     );
+    if std::env::var("SKATE_DEBUG_WATER").is_ok() {
+        // Water collision (surface physics 12), clustered coarsely by position.
+        let mut spots: std::collections::BTreeMap<(i32, i32), (usize, f32)> = Default::default();
+        for (t, s) in triangles.iter().zip(&packed_surfaces) {
+            if (s >> 7) & 31 != 12 { continue; }
+            let v = t.triangle.vertices[0];
+            let e = spots.entry(((v.x / 25.0).floor() as i32, (v.z / 25.0).floor() as i32)).or_insert((0, v.y));
+            e.0 += 1;
+        }
+        for ((x, z), (n, y)) in spots { eprintln!("WATER_COLLISION cell=({},{}) y={y:.1} tris={n}", x * 25, z * 25); }
+    }
     BoardWorld::with_query_metadata(
         triangles,
         QueryMetadata {
@@ -562,6 +573,21 @@ pub(crate) fn spawn(
     images: &mut impl crate::map_render::AssetSink<Image>,
     tuning: &crate::retail_render::MaterialTuning,
 ) {
+    spawn_with_pieces(map, commands, meshes, materials, retail_materials, images, tuning, None);
+}
+
+/// As `spawn`, optionally splitting geometry into movable prop pieces.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_with_pieces(
+    map: &SkateMap,
+    commands: &mut crate::map_render::SceneCommands,
+    meshes: &mut impl crate::map_render::AssetSink<Mesh>,
+    materials: &mut impl crate::map_render::AssetSink<StandardMaterial>,
+    retail_materials: &mut impl crate::map_render::AssetSink<crate::retail_render::RetailWorldMaterial>,
+    images: &mut impl crate::map_render::AssetSink<Image>,
+    tuning: &crate::retail_render::MaterialTuning,
+    pieces: Option<&crate::props::PropPieces>,
+) {
     // Texture roles have different transfer functions even when sharing a record.
     let _span = info_span!("prepare_map_geometry_and_textures").entered();
     let texture_ids = render_texture_ids(&map.textures);
@@ -650,6 +676,33 @@ pub(crate) fn spawn(
         vec![None; map.materials.len()];
     for RenderGroup { material: material_index, indices, retail } in groups {
         let m = &map.materials[material_index];
+        if std::env::var("SKATE_DEBUG_WATER").is_ok() && m.retail_definition.as_deref().is_some_and(|d| d.windows(6).any(|w| w == b"water." || w == b"ocean.")) {
+            let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+            for &i in &indices { let p = Vec3::from_array(map.geometry.vertices[i as usize].position); lo = lo.min(p); hi = hi.max(p); }
+            info!("WATER_MESH {} retail={} tris={} bounds={lo:.1}..{hi:.1}", m.name, retail.is_some(), indices.len() / 3);
+        }
+        // Dynamic props: split the batch per prop and re-centre it on the prop,
+        // so each can move on its own (props.rs). Everything else stays one batch.
+        let buckets: Vec<(Option<usize>, Vec<u32>)> = match pieces {
+            Some(split) => {
+                let mut by_piece: HashMap<Option<usize>, Vec<u32>> = HashMap::new();
+                for triangle in indices.chunks_exact(3) {
+                    let centroid = triangle.iter()
+                        .map(|&i| Vec3::from_array(map.geometry.vertices[i as usize].position))
+                        .sum::<Vec3>() / 3.0;
+                    by_piece.entry((split.assign)(centroid)).or_default().extend_from_slice(triangle);
+                }
+                by_piece.into_iter().collect()
+            }
+            None => vec![(None, indices)],
+        };
+        if pieces.is_some() && std::env::var("SKATE_DEBUG_PROPS").is_ok() {
+            info!("PROP_MATERIAL {} retail={} mode={:?} textures={:?}", m.name, retail.is_some(),
+                retail.as_ref().map(|r| r.params.mode), m.textures);
+        }
+        let retail_handle = retail.map(|material| retail_materials.add(material));
+        for (piece, indices) in buckets {
+        let offset = piece.and_then(|i| pieces.map(|split| split.centers[i])).unwrap_or(Vec3::ZERO);
         // Reindex each batch, preserving authored normals and both UV sets.
         let mut remap = HashMap::new();
         let mut vertices = Vec::new();
@@ -663,15 +716,16 @@ pub(crate) fn spawn(
                 })
             })
             .collect();
+        // Prop pieces stay readable: vehicles build ramp colliders from them.
+        let usage = if piece.is_some() { RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD } else { RenderAssetUsages::RENDER_WORLD };
         let mut mesh = Mesh::new(
             bevy::mesh::PrimitiveTopology::TriangleList,
-            RenderAssetUsages::RENDER_WORLD,
+            usage,
         )
         .with_inserted_attribute(
             Mesh::ATTRIBUTE_POSITION,
-            vertices.iter().map(|v| v.position).collect::<Vec<_>>(),
-        )
-        .with_inserted_attribute(
+            vertices.iter().map(|v| (Vec3::from_array(v.position) - offset).to_array()).collect::<Vec<_>>(),
+        )        .with_inserted_attribute(
             Mesh::ATTRIBUTE_NORMAL,
             vertices.iter().map(|v| v.normal).collect::<Vec<_>>(),
         )
@@ -707,9 +761,10 @@ pub(crate) fn spawn(
                 warn!("SKATE material {} tangent generation: {error}", m.name);
             }
         }
-        if let Some(material) = retail {
-            let material = retail_materials.add(material);
-            commands.spawn((Name::new(m.name.clone()), Mesh3d(meshes.add(mesh)), MeshMaterial3d(material), Transform::default()));
+        let transform = Transform::from_translation(offset);
+        if let Some(material) = &retail_handle {
+            let mut entity = commands.spawn((Name::new(m.name.clone()), Mesh3d(meshes.add(mesh)), MeshMaterial3d(material.clone()), transform));
+            if let Some(i) = piece { entity.insert(crate::props::PropPiece(i)); }
             continue;
         }
         // Vertex colours above carry retail decal coordinates, never PBR tint.
@@ -745,8 +800,9 @@ pub(crate) fn spawn(
             Name::new(m.name.clone()),
             Mesh3d(meshes.add(mesh)),
             MeshMaterial3d(material),
-            Transform::default(),
+            transform,
         ));
+        if let Some(i) = piece { entity.insert(crate::props::PropPiece(i)); }
         if let Some(image) = texture(m.textures[1], 1) {
             entity.insert(bevy::pbr::Lightmap {
                 image,
@@ -754,7 +810,9 @@ pub(crate) fn spawn(
                 bicubic_sampling: false,
             });
         }
+        }
     }
+    crate::street_lights::spawn(map, commands);
     for light in &map.lights {
         let color = Color::linear_rgb(light.color[0], light.color[1], light.color[2]);
         let transform = Transform::from_translation(Vec3::from_array(light.position));

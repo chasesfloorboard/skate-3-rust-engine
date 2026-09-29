@@ -91,7 +91,8 @@ impl Plugin for ModdingPlugin {
                 .after(crate::app::SimulationSet::Physics)
                 .run_if(crate::graphics_menu::gameplay_active),
         )
-        .add_systems(Update, update.after(crate::app::FrameSet::Animation));
+        .add_systems(Update, update.after(crate::app::FrameSet::Animation))
+        .add_systems(Update, (debug_kart, debug_offboard));
         vehicles::install(app);
         network::install(app);
         menu::install(app);
@@ -509,4 +510,51 @@ fn apply_one(world: &mut World, mods: &mut Mods, id: &str, command: Command) -> 
 pub(crate) fn package_root()->std::path::PathBuf {
     std::env::var_os("SKATE3_MODS").map(std::path::PathBuf::from).unwrap_or_else(||
         std::env::current_exe().ok().and_then(|p|p.parent().map(|p|p.join("mods"))).unwrap_or_else(||"mods".into()))
+}
+
+/// Test hook: SKATE_DEBUG_KART="body.glb|tyre.glb|radius|driver.glb|layout|x,y,z seat" (any
+/// part may be empty) spawns the Mario Kart mod's kart with those parts in
+/// front of the skater four seconds in, and gets in.
+/// Test hook: SKATE_DEBUG_OFFBOARD=1 puts the skater on foot where they
+/// stand, as a session marker return set off the board does.
+fn debug_offboard(mut skater: ResMut<crate::physics::SkaterRuntime>, time: Res<Time<Real>>, mut done: Local<bool>) {
+    if *done || std::env::var_os("SKATE_DEBUG_OFFBOARD").is_none() || time.elapsed_secs() < 5.0 { return; }
+    *done = true;
+    let m = skater.animated_skeleton.roots.animation_to_world;
+    match skater.player_input.request_teleport(m) {
+        Ok(()) => skater.teleport_state.request_manual(m, false),
+        Err(e) => warn!("SKATE_DEBUG_OFFBOARD: {e}"),
+    }
+}
+fn debug_kart(world: &mut World, mut stage: Local<u32>) {
+    let Ok(spec) = std::env::var("SKATE_DEBUG_KART") else { return };
+    let elapsed = world.resource::<Time<Real>>().elapsed_secs();
+    if *stage >= 2 || elapsed < 4.0 { return; }
+    if *stage == 1 && (world.resource::<vehicles::Vehicles>().occupied() || elapsed > 30.) { *stage = 2; return; }
+    let part = |i: usize| spec.split('|').nth(i).filter(|s| !s.is_empty()).map(str::to_owned);
+    let parts = skate_mods::VehicleParts {
+        body: part(0), wheels: part(1),
+        wheel_radius: part(2).and_then(|r| r.parse().ok()), driver: part(3), layout: part(4),
+        seat: part(5).and_then(|s| { let v: Vec<f32> = s.split(',').filter_map(|c| c.parse().ok()).collect(); (v.len() == 3).then(|| [v[0], v[1], v[2]]) }),
+        wheel_z: None,
+    };
+    let root = world.resource::<crate::physics::SkaterRuntime>().animated_skeleton.roots.animation_to_world;
+    let position = [root[3][0], root[3][1] + 1.0, root[3][2] + 3.0];
+    let spawn = *stage == 0;
+    *stage = 1;
+    world.resource_scope(|world, mods: Mut<Mods>| {
+        let Some((id, package)) = mods.manager.packages.iter().find(|(id, _)| id.contains("mario-kart")) else {
+            warn!("SKATE_DEBUG_KART: Mario Kart mod not loaded");
+            return;
+        };
+        let (id, root) = (id.clone(), package.root.clone());
+        // Spawn once, then retry entering until the kart has loaded.
+        let mut commands = vec![Command::VehicleEnter { key: "kart".into() }];
+        if spawn {
+            commands.insert(0, Command::VehicleSpawn { key: "kart".into(), definition: "vehicle.json".into(), position, heading: 0.0, parts: Some(parts) });
+        }
+        for command in commands {
+            if let Err(error) = vehicles::command(world, &root, &id, command) { warn!("SKATE_DEBUG_KART: {error}"); }
+        }
+    });
 }

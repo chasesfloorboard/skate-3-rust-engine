@@ -10,7 +10,7 @@ use bevy::{
         render_resource::{Extent3d, TextureFormat},
         renderer::RenderAdapter,
     },
-    window::{PresentMode, PrimaryWindow},
+    window::{MonitorSelection, PresentMode, PrimaryWindow, WindowMode},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -42,9 +42,35 @@ struct GraphicsSettings {
     fps: u32,
     occlusion: bool,
     hour: f32,
+    /// Off pins retail districts to their authored midday look.
+    day_night: bool,
     day_speed: u32,
     ambient_level: Option<u32>,
+    /// Index into retail_sky::SKY_PRESETS.
+    sky: u32,
+    /// Borderless fullscreen on the current monitor. Exclusive fullscreen is
+    /// not offered: winit ignores it on Wayland, and borderless already gets
+    /// direct scanout there.
+    fullscreen: bool,
+    /// Shadow quality: 0 off .. 4 ultra (map size, cascades and distance).
+    shadows: u32,
+    /// Street lamps lit at once: 0 none .. 3 many.
+    lights: u32,
 }
+/// Shadow tiers: (map size, cascades, distance m).
+const SHADOW_TIERS: [(usize, usize, f32); 5] = [(1024, 1, 0.0), (1024, 1, 30.0), (2048, 2, 50.0), (4096, 3, 80.0), (4096, 4, 100.0)];
+const SHADOW_NAMES: [&str; 5] = ["Off", "Low", "Medium", "High", "Ultra"];
+/// Street lamps lit at once per tier.
+const LIGHT_COUNTS: [usize; 4] = [0, 8, 16, 32];
+const LIGHT_NAMES: [&str; 4] = ["Off", "Few", "Some", "Many"];
+/// Presets: (render scale, MSAA, shadows, lights, occlusion).
+const PRESETS: [(&str, u32, u32, u32, u32, bool); 5] = [
+    ("Potato", 50, 1, 0, 0, false),
+    ("Low", 75, 1, 1, 1, false),
+    ("Medium", 100, 2, 2, 2, false),
+    ("High", 100, 4, 3, 3, false),
+    ("Ultra", 100, 8, 4, 3, false),
+];
 impl Default for GraphicsSettings {
     fn default() -> Self {
         Self {
@@ -53,16 +79,23 @@ impl Default for GraphicsSettings {
             scale: 100,
             samples: 4,
             fps: 0,
-            occlusion: true,
+            // GPU occlusion culling costs more CPU than it saves here.
+            occlusion: false,
             hour: 12.,
+            day_night: true,
             day_speed: 60,
             ambient_level: None,
+            sky: 0,
+            fullscreen: false,
+            shadows: 3,
+            lights: 3,
         }
     }
 }
 impl GraphicsSettings {
     fn validated(mut self) -> Self {
         self.ambient_level = self.ambient_level.map(|level| level.min(100));
+        if self.sky as usize >= crate::retail_render::SKY_PRESETS.len() { self.sky = 0; }
         self.hour = if self.hour.is_finite() { self.hour.rem_euclid(24.) } else { 12. };
         if !DAY_SPEEDS.contains(&self.day_speed) { self.day_speed = 60; }
         if !RESOLUTIONS.contains(&(self.width, self.height)) {
@@ -77,14 +110,98 @@ impl GraphicsSettings {
         if !LIMITS.contains(&self.fps) {
             self.fps = 0;
         }
+        self.shadows = self.shadows.min(4);
+        self.lights = self.lights.min(3);
         self
     }
     fn internal_size(&self, window: UVec2) -> UVec2 {
         (window * self.scale / 100).max(UVec2::ONE)
     }
 }
+/// Skate 3-style pause tabs over the menu rows, in display order.
+pub(crate) const TABS: [(&str, &[usize]); 4] = [
+    ("Main", &[14, 10, 12, 6, 7, 22, 23, 8, 9]),
+    ("Online", &[11]),
+    ("Mod Settings", &[15, 16, 13]),
+    ("Options", &[21, 0, 1, 2, 19, 20, 3, 4, 17, 5, 18]),
+];
+/// Tab buttons are menu rows numbered from here.
+pub(crate) const TAB_ROW: usize = 100;
+pub(crate) fn tab_of(row: usize) -> Option<usize> {
+    TABS.iter().position(|(_, rows)| rows.contains(&row))
+}
+/// One-line description under the selected item, as in the retail menu.
+pub(crate) fn describe(row: usize) -> &'static str {
+    match row {
+        14 => "Explore San Vanelona and teleport to spots",
+        10 => "Change your skater's look and gear",
+        12 => "Skate as a pro, a special or your own model",
+        6 => "Choose a district or park to load",
+        7 => "Load the chosen district",
+        8 => "Back to skating",
+        9 => "Exit to the desktop",
+        11 => "Skate with friends online or on your network",
+        15 => "Turn installed mods on or off",
+        16 => "Turn the day/night cycle on or off, set the time",
+        13 => "Check for a newer version",
+        0 => "Window size",
+        1 => "Render resolution as a share of the window",
+        2 => "Edge smoothing",
+        3 => "Cap the frame rate",
+        4 => "Skip drawing hidden scenery",
+        17 => "Borderless fullscreen",
+        5 => "How forgiving the physics are",
+        18 => "Master, music, board and ambience volume",
+        19 => "Shadow detail and distance",
+        20 => "How many street lamps light the night",
+        21 => "Set everything at once, from Potato to Ultra",
+        22 => "Pick one of the game's movies",
+        23 => "Watch the movie (any button skips)",
+        _ => "",
+    }
+}
+/// Volume percentages, saved to settings/audio.json beside graphics.json.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct AudioSettings {
+    master: u32,
+    music: u32,
+    board: u32,
+    ambience: u32,
+}
+impl Default for AudioSettings {
+    fn default() -> Self {
+        Self { master: 100, music: 100, board: 100, ambience: 100 }
+    }
+}
+#[derive(Clone, Copy)]
+pub(crate) enum AudioChannel {
+    Music,
+    Board,
+    Ambience,
+}
+impl AudioSettings {
+    fn validated(mut self) -> Self {
+        for level in [&mut self.master, &mut self.music, &mut self.board, &mut self.ambience] {
+            *level = (*level).min(100) / 10 * 10;
+        }
+        self
+    }
+    fn level(&mut self, row: usize) -> Option<&mut u32> {
+        match row {
+            0 => Some(&mut self.master),
+            1 => Some(&mut self.music),
+            2 => Some(&mut self.board),
+            3 => Some(&mut self.ambience),
+            _ => None,
+        }
+    }
+}
 #[derive(Resource)]
 pub(crate) struct Menu {
+    /// Movie picked in the Movies row, and one asked to play (movies.rs).
+    pub(crate) movie: usize,
+    pub(crate) play_movie: Option<String>,
     pub(crate) open: bool,
     selected: usize,
     settings: GraphicsSettings,
@@ -97,16 +214,67 @@ pub(crate) struct Menu {
     multiplayer: bool,
     browser: bool,
     daylight: bool,
+    audio: bool,
+    audio_settings: AudioSettings,
+    audio_path: PathBuf,
+    tab: usize,
 }
 impl Menu {
+    pub(crate) fn day_speed(&self) -> u32 {
+        self.settings.day_speed
+    }
+    pub(crate) fn sky_preset(&self) -> usize {
+        self.settings.sky as usize
+    }
+    pub(crate) fn tab(&self) -> usize {
+        self.tab
+    }
+    /// Rows whose value Left/Right cycles; the rest only react to A/Enter.
+    fn adjustable(&self, row: usize) -> bool {
+        if self.audio { row < 4 } else if self.daylight { row < 5 } else if self.multiplayer || self.browser { false } else { row <= 6 || row == 17 }
+    }
+    /// The tabbed top level, as opposed to a submenu with its own rows.
+    pub(crate) fn in_tabs(&self) -> bool {
+        !self.audio && !self.daylight && !self.multiplayer && !self.browser
+    }
+    /// Linear gain for a channel, master included.
+    /// Street lamps that may be lit at once (quality setting).
+    pub(crate) fn street_light_limit(&self) -> usize {
+        LIGHT_COUNTS[self.settings.lights.min(3) as usize]
+    }
+    pub(crate) fn audio_gain(&self, channel: AudioChannel) -> f32 {
+        let a = &self.audio_settings;
+        let level = match channel {
+            AudioChannel::Music => a.music,
+            AudioChannel::Board => a.board,
+            AudioChannel::Ambience => a.ambience,
+        };
+        // Squared so each 10% step sounds roughly even to the ear.
+        (a.master as f32 / 100.).powi(2) * (level as f32 / 100.).powi(2)
+    }
     pub(crate) fn ambient_brightness(&self, automatic: f32) -> f32 {
         self.settings.ambient_level.map_or(automatic, |level| level as f32 * 10.)
     }
+    /// How deep the retail night grade goes (day_cycle.rs): Auto keeps the
+    /// authored night, 0% is darker still, 100% leaves night almost as bright
+    /// as day.
+    pub(crate) fn night_depth(&self) -> f32 {
+        self.settings.ambient_level.map_or(1.0, |level| 1.25 * (1.0 - level as f32 / 100.))
+    }
     pub(crate) fn advance_day(&mut self, seconds: f32) -> f32 {
+        if !self.settings.day_night {
+            return 12.;
+        }
         if !self.open && self.settings.day_speed > 0 {
             self.settings.hour = (self.settings.hour + seconds * self.settings.day_speed as f32 / 3600.).rem_euclid(24.);
         }
         self.settings.hour
+    }
+    pub(crate) fn selected(&self) -> usize {
+        self.selected
+    }
+    pub(crate) fn in_audio(&self) -> bool {
+        self.audio
     }
     pub(crate) fn diagnostic_settings(&self) -> String {
         format!("{:?}", self.settings)
@@ -124,13 +292,24 @@ struct SceneTarget(Handle<Image>);
 #[derive(Resource)]
 struct FramePacer(Instant);
 #[derive(Component)]
-struct MenuRoot;
+pub(crate) struct MenuRoot;
+/// Title and section heading, restyled by the retail menu skin.
 #[derive(Component)]
-pub(crate) struct MenuRow(usize);
+pub(crate) struct MenuHeading;
+/// Container of the 19 menu rows, reordered to the current tab's order.
 #[derive(Component)]
-struct MenuLabel(usize);
+pub(crate) struct MenuRows;
+/// Tab strip above the rows; each tab is a MenuRow numbered from TAB_ROW.
 #[derive(Component)]
-struct StatusLabel;
+pub(crate) struct MenuTabs;
+#[derive(Component)]
+pub(crate) struct TabLabel(pub(crate) usize);
+#[derive(Component)]
+pub(crate) struct MenuRow(pub(crate) usize);
+#[derive(Component)]
+pub(crate) struct MenuLabel(pub(crate) usize);
+#[derive(Component)]
+pub(crate) struct StatusLabel;
 
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct MenuInput;
@@ -145,7 +324,8 @@ impl Plugin for GraphicsMenuPlugin {
         app.insert_resource(FramePacer(Instant::now()))
             .add_systems(PostStartup, setup.in_set(PresentationSetup))
             .add_systems(PreUpdate, interact.in_set(MenuInput).after(bevy::input::InputSystems))
-            .add_systems(Update, (crate::map_render::advance_day, apply, labels).chain())
+            .add_systems(Update, (crate::map_render::advance_day, apply, labels, order_rows, crate::menu_skin::chrome, crate::menu_skin::apply).chain())
+            .add_systems(Update, apply_shadows)
             .add_systems(PostUpdate, crate::map_render::position_celestial_bodies.before(bevy::transform::TransformSystems::Propagate))
             .add_systems(Last, pace);
     }
@@ -172,6 +352,11 @@ fn setup(
         Err(_) => GraphicsSettings::default(),
     }
     .validated();
+    let audio_path = path.with_file_name("audio.json");
+    let audio_settings = std::fs::read(&audio_path).ok()
+        .and_then(|bytes| serde_json::from_slice::<AudioSettings>(&bytes).map_err(|e| warn!("Audio settings: {e}")).ok())
+        .unwrap_or_default()
+        .validated();
     let supported_msaa: Vec<_> = [1, 2, 4, 8]
         .into_iter()
         .filter(|&samples| {
@@ -235,27 +420,38 @@ fn setup(
         display: Display::None, width:percent(100), height:percent(100), align_items:AlignItems::Center,
         justify_content:JustifyContent::Center, position_type:PositionType::Absolute, ..default()
     }, BackgroundColor(Color::srgba(0.015,0.025,0.04,0.88)))).with_children(|root| {
-        root.spawn((Node { width:px(560),max_width:percent(95),padding:UiRect::all(px(18)),flex_direction:FlexDirection::Column,row_gap:px(4),border_radius:BorderRadius::all(px(12)),..default() },
+        root.spawn((Node { width:vmin(60),min_width:px(560),max_width:percent(95),padding:UiRect::all(px(18)),flex_direction:FlexDirection::Column,row_gap:px(4),border_radius:BorderRadius::all(px(12)),..default() },
             BackgroundColor(Color::srgb(0.035,0.055,0.08)))).with_children(|panel| {
-            panel.spawn((Text::new("GAME MENU"),TextFont {font_size:32.,..default()},TextColor(Color::WHITE)));
-            panel.spawn((Text::new("GAMEPLAY & GRAPHICS"),TextFont {font_size:16.,..default()},TextColor(Color::srgb(0.4,0.85,0.85))));
-            for i in 0..17 {
-                panel.spawn((Button, MenuRow(i), Node {width:percent(100),min_height:px(26),padding:UiRect::all(px(3)),align_items:AlignItems::Center,border_radius:BorderRadius::all(px(5)),..default()},
-                    BackgroundColor(Color::srgb(0.08,0.11,0.15)))).with_children(|row| {
-                    row.spawn((MenuLabel(i),Text::new(""),TextFont {font_size:18.,..default()},TextColor(Color::WHITE)));
-                });
-            }
+            panel.spawn((MenuHeading,Text::new("GAME MENU"),TextFont {font_size:32.,..default()},TextColor(Color::WHITE)));
+            panel.spawn((MenuHeading,Text::new("GAMEPLAY & GRAPHICS"),TextFont {font_size:16.,..default()},TextColor(Color::srgb(0.4,0.85,0.85))));
+            panel.spawn((MenuTabs, Node { column_gap: px(6), margin: UiRect::vertical(px(4)), ..default() })).with_children(|tabs| {
+                for (i, (name, _)) in TABS.iter().enumerate() {
+                    tabs.spawn((Button, MenuRow(TAB_ROW + i), Node { padding: UiRect::axes(px(10), px(4)), align_items: AlignItems::Center, border_radius: BorderRadius::all(px(5)), ..default() },
+                        BackgroundColor(Color::srgb(0.08,0.11,0.15))))
+                        .with_child((TabLabel(i), Text::new(name.to_uppercase()), TextFont { font_size: 15., ..default() }, TextColor(Color::WHITE)));
+                }
+            });
+            panel.spawn((MenuRows, Node { width: percent(100), flex_direction: FlexDirection::Column, row_gap: px(4), ..default() })).with_children(|rows| {
+                for i in 0..24 {
+                    rows.spawn((Button, MenuRow(i), Node {width:percent(100),min_height:px(26),padding:UiRect::all(px(3)),align_items:AlignItems::Center,border_radius:BorderRadius::all(px(5)),..default()},
+                        BackgroundColor(Color::srgb(0.08,0.11,0.15)))).with_children(|row| {
+                        row.spawn((MenuLabel(i),Text::new(""),TextFont {font_size:18.,..default()},TextColor(Color::WHITE)));
+                    });
+                }
+            });
             panel.spawn((StatusLabel,Text::new(""),TextFont {font_size:15.,..default()},TextColor(Color::srgb(0.65,0.75,0.8))));
-            panel.spawn((Text::new("Click to cycle | Up/Down select | Left/Right change\nEsc resume | Changes save automatically"),TextFont {font_size:14.,..default()},TextColor(Color::srgb(0.65,0.75,0.8))));
+            panel.spawn((Text::new("LB/RB or Q/E switch tabs | Up/Down select | Left/Right change\nEsc resume | Changes save automatically"),TextFont {font_size:14.,..default()},TextColor(Color::srgb(0.65,0.75,0.8))));
         });
     });
     commands.insert_resource(SceneTarget(target));
     let maps = crate::map_library::discover(&config.asset_root);
     let selected_map = maps.iter().position(|m| m.path.as_ref() == config.map_path.as_ref()).unwrap_or(0);
-    if config.start_paused { time.pause(); }
+    // Test hook: open the menu on a tab for screenshots.
+    let debug_tab = std::env::var("SKATE_DEBUG_MENU").ok().and_then(|t| t.parse::<usize>().ok()).filter(|t| *t < TABS.len());
+    if config.start_paused || debug_tab.is_some() { time.pause(); }
     commands.insert_resource(Menu {
-        open: config.start_paused,
-        selected: 0,
+        open: config.start_paused || debug_tab.is_some(),
+        selected: TABS[debug_tab.unwrap_or(0)].1[0],
         settings,
         path,
         supported_msaa,
@@ -263,9 +459,15 @@ fn setup(
         status: String::new(),
         maps,
         selected_map,
+        movie: 0,
+        play_movie: None,
         multiplayer: false,
         browser: false,
         daylight: false,
+        audio: false,
+        audio_settings,
+        audio_path,
+        tab: debug_tab.unwrap_or(0),
     });
 }
 fn msaa(samples: u32) -> Msaa {
@@ -306,6 +508,10 @@ pub(crate) fn interact(
     if mods.open || travel.open || travel.closed_this_frame || customiser.open || custom_models.open { return; }
     if keys.just_pressed(KeyCode::Escape) || nav.pressed & 0x10 != 0 {
         menu.open = !menu.open;
+        if menu.open && menu.in_tabs() {
+            menu.tab = 0;
+            menu.selected = TABS[0].1[0];
+        }
     }
     let mut action = None;
     for event in typing.read() {
@@ -329,18 +535,44 @@ pub(crate) fn interact(
         }
     }
     if menu.open {
-        let rows = if menu.daylight { 4 } else if menu.multiplayer { 11 } else { 17 };
+        let rows = if menu.audio { 5 } else if menu.daylight { 6 } else if menu.multiplayer { 11 } else { 19 };
+        if menu.in_tabs() {
+            // Coming back from a submenu lands on the tab that owns its row.
+            if !TABS[menu.tab].1.contains(&menu.selected) {
+                menu.tab = tab_of(menu.selected).unwrap_or(0);
+                menu.selected = if TABS[menu.tab].1.contains(&menu.selected) { menu.selected } else { TABS[menu.tab].1[0] };
+            }
+        }
         if !panel.focused {
+        let step = |menu: &mut Menu, delta: i32| {
+            let list = TABS[menu.tab].1;
+            let at = list.iter().position(|r| *r == menu.selected).unwrap_or(0) as i32;
+            menu.selected = list[(at + delta).rem_euclid(list.len() as i32) as usize];
+        };
+        if menu.in_tabs() {
+            let tab_step = if keys.just_pressed(KeyCode::KeyE) || nav.pressed & 0x200 != 0 { 1 }
+                else if keys.just_pressed(KeyCode::KeyQ) || nav.pressed & 0x100 != 0 { -1 } else { 0 };
+            if tab_step != 0 {
+                menu.tab = (menu.tab as i32 + tab_step).rem_euclid(TABS.len() as i32) as usize;
+                menu.selected = TABS[menu.tab].1[0];
+            }
+        }
         if keys.just_pressed(KeyCode::ArrowUp) || nav.pressed & 1 != 0 {
-            menu.selected = (menu.selected + rows - 1) % rows;
+            if menu.in_tabs() { step(&mut menu, -1) } else { menu.selected = (menu.selected + rows - 1) % rows; }
         }
         if keys.just_pressed(KeyCode::ArrowDown) || nav.pressed & 2 != 0 {
-            menu.selected = (menu.selected + 1) % rows;
+            if menu.in_tabs() { step(&mut menu, 1) } else { menu.selected = (menu.selected + 1) % rows; }
         }
-        if keys.just_pressed(KeyCode::ArrowLeft) || nav.pressed & 4 != 0 {
+        // Left/Right only change values; rows that open a submenu or run
+        // something need A/Enter, as on the retail menu.
+        let adjustable = menu.adjustable(menu.selected);
+        if (keys.just_pressed(KeyCode::ArrowLeft) || nav.pressed & 4 != 0) && adjustable {
             action = Some((menu.selected, -1));
         }
-        if keys.just_pressed(KeyCode::ArrowRight) || keys.just_pressed(KeyCode::Enter) || nav.pressed & (8 | 0x1000) != 0 {
+        if (keys.just_pressed(KeyCode::ArrowRight) || nav.pressed & 8 != 0) && adjustable {
+            action = Some((menu.selected, 1));
+        }
+        if keys.just_pressed(KeyCode::Enter) || nav.pressed & 0x1000 != 0 {
             action = Some((menu.selected, 1));
         }
         }
@@ -352,17 +584,44 @@ pub(crate) fn interact(
             }
         }
     }
+    if let Some(tab) = action.and_then(|(row, _)| row.checked_sub(TAB_ROW)) {
+        menu.tab = tab;
+        menu.selected = TABS[tab].1[0];
+        action = None;
+    }
     if let Some((row, direction)) = action {
         let day_action = menu.daylight;
-        if menu.daylight {
+        let audio_action = menu.audio;
+        if menu.audio {
+            if let Some(level) = menu.audio_settings.level(row) {
+                *level = (*level as i32 + direction * 10).clamp(0, 100) as u32;
+                let save = (|| -> Result<(), String> {
+                    std::fs::create_dir_all(menu.audio_path.parent().unwrap()).map_err(|e| e.to_string())?;
+                    std::fs::write(&menu.audio_path, serde_json::to_vec_pretty(&menu.audio_settings).map_err(|e| e.to_string())?)
+                        .map_err(|e| e.to_string())
+                })();
+                menu.status = match save {
+                    Ok(()) => "Saved".into(),
+                    Err(e) => format!("Could not save: {e}"),
+                };
+            } else {
+                menu.audio = false;
+                menu.selected = 18;
+            }
+        } else if menu.daylight {
             match row {
-                0 => menu.settings.hour = ((menu.settings.hour * 4.).round() + direction as f32).rem_euclid(96.) / 4.,
-                1 => menu.settings.day_speed = cycle(DAY_SPEEDS, menu.settings.day_speed, direction),
-                2 => {
+                0 => menu.settings.day_night = !menu.settings.day_night,
+                1 => menu.settings.hour = ((menu.settings.hour * 4.).round() + direction as f32).rem_euclid(96.) / 4.,
+                2 => menu.settings.day_speed = cycle(DAY_SPEEDS, menu.settings.day_speed, direction),
+                3 => {
                     // Auto, 0%, 5%, ... 100%, then Auto again.
                     let index = menu.settings.ambient_level.map_or(0, |level| level as i32 / 5 + 1);
                     let next = (index + direction).rem_euclid(22);
                     menu.settings.ambient_level = if next == 0 { None } else { Some((next as u32 - 1) * 5) };
+                }
+                4 => {
+                    let count = crate::retail_render::SKY_PRESETS.len() as i32;
+                    menu.settings.sky = (menu.settings.sky as i32 + direction).rem_euclid(count) as u32;
                 }
                 _ => { menu.daylight = false; menu.selected = 16; }
             }
@@ -430,6 +689,20 @@ pub(crate) fn interact(
                 }
                 3 => menu.settings.fps = cycle(LIMITS, menu.settings.fps, direction),
                 4 => menu.settings.occlusion = !menu.settings.occlusion,
+                19 => menu.settings.shadows = (menu.settings.shadows as i32 + direction).clamp(0, 4) as u32,
+                22 => menu.movie = (menu.movie as i32 + direction).rem_euclid(crate::movies::MOVIES.len() as i32) as usize,
+                23 => menu.play_movie = Some(crate::movies::MOVIES[menu.movie].0.into()),
+                20 => menu.settings.lights = (menu.settings.lights as i32 + direction).clamp(0, 3) as u32,
+                21 => {
+                    let current = PRESETS.iter().position(|p| menu.settings.scale == p.1 && menu.settings.samples == p.2
+                        && menu.settings.shadows == p.3 && menu.settings.lights == p.4).unwrap_or(2);
+                    let (_, scale, samples, shadows, lights, occlusion) = PRESETS[(current as i32 + direction).clamp(0, 4) as usize];
+                    menu.settings.scale = scale;
+                    menu.settings.samples = if menu.supported_msaa.contains(&samples) { samples } else { 1 };
+                    menu.settings.shadows = shadows;
+                    menu.settings.lights = lights;
+                    menu.settings.occlusion = occlusion;
+                }
                 5 => {
                     menu.difficulty = cycle(&Difficulty::ALL, menu.difficulty, direction);
                     physics.set_difficulty(menu.difficulty);
@@ -467,11 +740,13 @@ pub(crate) fn interact(
                 13 => menu.status = updater.open(false),
                 14 => travel.open = true,
                 15 => mods.begin(),
-                16 => { menu.daylight = true; menu.selected = 0; menu.status = "Custom maps: change time, cycle speed and ambient light. Retail lighting stays authored.".into(); },
+                17 => menu.settings.fullscreen = !menu.settings.fullscreen,
+                18 => { menu.audio = true; menu.selected = 0; menu.status = "Left/Right adjusts. Music: N next song, M mute.".into(); },
+                16 => { menu.daylight = true; menu.selected = 0; menu.status = "Time of day and cycle speed. Retail districts darken and warm with the sun.".into(); },
                 _ => {}
             }
         }
-        if (row < 5 && !menu.multiplayer && !menu.daylight && !day_action) || (day_action && row < 3) {
+        if !audio_action && (((row < 5 || row == 17) && !menu.multiplayer && !menu.daylight && !menu.audio && !day_action) || (day_action && row < 5)) {
             let save = (|| -> Result<(), String> {
                 std::fs::create_dir_all(menu.path.parent().unwrap()).map_err(|e| e.to_string())?;
                 std::fs::write(
@@ -492,6 +767,38 @@ pub(crate) fn interact(
         time.unpause();
     }
 }
+/// Shadow quality: the shadow map size, and every sun-like light's cascades
+/// (the player-only receiver light just switches on and off), reapplied when
+/// the setting changes or a map spawns new lights.
+fn apply_shadows(
+    menu: Res<Menu>,
+    mut map: ResMut<bevy::light::DirectionalLightShadowMap>,
+    mut lights: Query<(&mut DirectionalLight, &mut bevy::light::CascadeShadowConfig, Option<&bevy::camera::visibility::RenderLayers>)>,
+    mut previous: Local<Option<(u32, usize)>>,
+) {
+    let tier = menu.settings.shadows.min(4);
+    // Reapply when the setting changes or lights come and go (map loads).
+    let state = (tier, lights.iter().len());
+    if *previous == Some(state) { return; }
+    *previous = Some(state);
+    let (size, cascades, distance) = SHADOW_TIERS[tier as usize];
+    if map.size != size { map.size = size; }
+    for (mut light, mut config, layers) in &mut lights {
+        light.shadows_enabled = tier > 0;
+        let player_only = layers.is_some_and(|l| l.intersects(&bevy::camera::visibility::RenderLayers::layer(28))
+            && !l.intersects(&bevy::camera::visibility::RenderLayers::layer(0)));
+        if tier > 0 && !player_only {
+            *config = bevy::light::CascadeShadowConfigBuilder {
+                num_cascades: cascades,
+                maximum_distance: distance,
+                first_cascade_far_bound: (distance / 12.0).clamp(4.0, 10.0),
+                ..default()
+            }.build();
+        }
+    }
+    info!("Shadows: {} ({size}px, {cascades} cascades, {distance} m)", SHADOW_NAMES[tier as usize]);
+}
+
 fn apply(
     mut commands: Commands,
     menu: Res<Menu>,
@@ -503,8 +810,20 @@ fn apply(
 ) {
     if previous
         .as_ref()
-        .is_none_or(|p| p.width != menu.settings.width || p.height != menu.settings.height)
+        .is_none_or(|p| p.fullscreen != menu.settings.fullscreen)
     {
+        window.mode = if menu.settings.fullscreen {
+            WindowMode::BorderlessFullscreen(MonitorSelection::Current)
+        } else {
+            WindowMode::Windowed
+        };
+    }
+    // Leaving fullscreen restores the chosen windowed resolution.
+    if previous.as_ref().is_none_or(|p| {
+        p.width != menu.settings.width
+            || p.height != menu.settings.height
+            || (p.fullscreen && !menu.settings.fullscreen)
+    }) {
         window
             .resolution
             .set_physical_resolution(menu.settings.width, menu.settings.height);
@@ -572,15 +891,28 @@ fn labels(
     let s = &menu.settings;
     let size = s.internal_size(window.physical_size());
     for (label, mut text) in &mut labels {
-        **text = if menu.daylight {
+        **text = if menu.audio {
+            let a = &menu.audio_settings;
+            let bar = |level: u32| format!("{:<10} {level:>3}%", "#".repeat(level as usize / 10));
             match label.0 {
-                0 => { let minutes = (s.hour * 60.).floor() as u32 % 1440; format!("Time of day          {:02}:{:02}", minutes / 60, minutes % 60) },
-                1 => if s.day_speed == 0 { "Cycle speed          Frozen".into() } else { format!("Cycle speed          {}x ({} min/day)", s.day_speed, 1440 / s.day_speed) },
-                2 => match s.ambient_level {
+                0 => format!("Master volume        {}", bar(a.master)),
+                1 => format!("Music                {}", bar(a.music)),
+                2 => format!("Board sounds         {}", bar(a.board)),
+                3 => format!("Ambience             {}", bar(a.ambience)),
+                4 => "Back".into(),
+                _ => String::new(),
+            }
+        } else if menu.daylight {
+            match label.0 {
+                0 => format!("Day/night cycle      {}", if s.day_night { "On" } else { "Off (always day)" }),
+                1 => { let minutes = (s.hour * 60.).floor() as u32 % 1440; format!("Time of day          {:02}:{:02}", minutes / 60, minutes % 60) },
+                2 => if s.day_speed == 0 { "Cycle speed          Frozen".into() } else { format!("Cycle speed          {}x ({} min/day)", s.day_speed, 1440 / s.day_speed) },
+                3 => match s.ambient_level {
                     Some(level) => format!("Ambient light        {level}%"),
                     None => "Ambient light        Auto (day/night)".into(),
                 },
-                3 => "Back".into(),
+                4 => format!("Sky colour           {}", crate::retail_render::SKY_PRESETS[s.sky as usize].0),
+                5 => "Back".into(),
                 _ => String::new(),
             }
         } else if menu.browser {
@@ -656,20 +988,31 @@ fn labels(
                     if s.occlusion { "On" } else { "Off" }
                 ),
                 5 => format!("Difficulty            {}", menu.difficulty.label()),
+                19 => format!("Shadows               {}", SHADOW_NAMES[s.shadows.min(4) as usize]),
+                22 => format!("Movie                 {}", crate::movies::MOVIES[menu.movie].1),
+                23 => "Watch Movie".into(),
+                20 => format!("Street lights         {}", LIGHT_NAMES[s.lights.min(3) as usize]),
+                21 => format!("Quality preset        {}", PRESETS.iter().find(|p| s.scale == p.1 && s.samples == p.2
+                    && s.shadows == p.3 && s.lights == p.4).map_or("Custom", |p| p.0)),
                 6 => format!(
-                    "Map                   {}",
+                    "District              {}",
                     menu.maps[menu.selected_map].label
                 ),
-                7 => if transition.busy() { "Loading map...".into() } else { "Load map".into() },
-                8 => "Resume".into(),
-                9 => "Quit game".into(),
-                10 => "Character customiser".into(),
-                12 => "Custom models".into(),
+                7 => if transition.busy() { "Loading District...".into() } else { "Load District".into() },
+                8 => "Free Play".into(),
+                9 => "Quit Game".into(),
+                10 => "Edit Skater".into(),
+                12 => "Call Skater".into(),
                 13 => "Updates".into(),
                 15 => "Mods".into(),
-                14 => "Teleport…".into(),
-                16 => "Day & night…".into(),
-                _ => "Multiplayer".into(),
+                14 => "Challenge Map".into(),
+                16 => "Day & Night".into(),
+                18 => "Audio".into(),
+                17 => format!(
+                    "Fullscreen            {}",
+                    if s.fullscreen { "On (borderless)" } else { "Off" }
+                ),
+                _ => "Party Play".into(),
             }
         };
     }
@@ -691,12 +1034,44 @@ fn labels(
         menu.status.clone()
     };
     for (row, interaction, mut color, mut node) in &mut buttons {
-        node.display = if (menu.daylight && row.0 >= 4) || (menu.multiplayer && row.0 >= 11) { Display::None } else { Display::Flex };
+        let hidden = if row.0 >= TAB_ROW {
+            !menu.in_tabs()
+        } else if menu.in_tabs() {
+            !TABS[menu.tab].1.contains(&row.0)
+        } else {
+            (menu.audio && row.0 >= 5) || (menu.daylight && row.0 >= 6) || (menu.multiplayer && row.0 >= 11)
+        };
+        node.display = if hidden { Display::None } else { Display::Flex };
+        if row.0 >= TAB_ROW {
+            color.0 = if row.0 - TAB_ROW == menu.tab { Color::srgb(0.10, 0.30, 0.34) } else { Color::srgb(0.08, 0.11, 0.15) };
+            continue;
+        }
         color.0 = if row.0 == menu.selected || *interaction == Interaction::Hovered {
             Color::srgb(0.10, 0.30, 0.34)
         } else {
             Color::srgb(0.08, 0.11, 0.15)
         };
+    }
+}
+/// Shows the current tab's rows in its authored order (e.g. Challenge map
+/// first); submenus use plain row order.
+fn order_rows(
+    menu: Res<Menu>,
+    container: Single<(Entity, &Children), With<MenuRows>>,
+    rows: Query<&MenuRow>,
+    mut commands: Commands,
+) {
+    let (entity, children) = *container;
+    let index = |e: &Entity| rows.get(*e).map_or(usize::MAX, |r| r.0);
+    let mut wanted: Vec<Entity> = children.iter().collect();
+    let rank = |row: usize| if menu.in_tabs() {
+        TABS[menu.tab].1.iter().position(|r| *r == row).unwrap_or(usize::MAX / 2 + row)
+    } else {
+        row
+    };
+    wanted.sort_by_key(|e| rank(index(e)));
+    if !wanted.iter().eq(children.iter().collect::<Vec<_>>().iter()) {
+        commands.entity(entity).replace_children(&wanted);
     }
 }
 fn pace(menu: Option<Res<Menu>>, mut pacer: ResMut<FramePacer>) {
@@ -731,6 +1106,7 @@ mod tests {
                 open: false, selected: 0, settings: GraphicsSettings::default(),
                 difficulty: Difficulty::Easy, path: PathBuf::new(), supported_msaa: vec![1, 2, 4, 8], status: String::new(),
                 multiplayer: false, browser: false, daylight: false,
+                audio: false, audio_settings: AudioSettings::default(), audio_path: PathBuf::new(), tab: 0,
                 maps: vec![crate::map_library::Entry { label: "Test world".into(), path: None }], selected_map: 0,
             })
             .add_systems(Update, apply);
@@ -747,6 +1123,10 @@ mod tests {
         }
         app.world_mut().spawn((Window::default(), PrimaryWindow));
         let camera = app.world_mut().spawn((Camera3d::default(), Msaa::Off)).id();
+        app.update();
+        // Off by default: GPU occlusion culling costs more CPU than it saves.
+        assert!(!app.world().entity(camera).contains::<OcclusionCulling>());
+        app.world_mut().resource_mut::<Menu>().settings.occlusion = true;
         app.update();
         assert!(app.world().entity(camera).contains::<OcclusionCulling>());
         assert!(app.world().entity(camera).contains::<DepthPrepass>());

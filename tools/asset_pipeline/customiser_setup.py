@@ -166,6 +166,7 @@ def install(iso, base, game_exe, report, refresh=False):
     # Extract an ISO once and share that source across core and character jobs.
     # Existing groups/fingerprints stay unchanged; a character-only update never
     # reconverts maps or overwrites settings and imported character libraries.
+    from .game_audio import prepare as game_audio
     from .setup_state import source_directory, setup_lock
     base.parent.mkdir(parents=True, exist_ok=True)
     selected = iso.resolve()
@@ -173,13 +174,14 @@ def install(iso, base, game_exe, report, refresh=False):
         if selected.suffix.lower() == '.iso':
             if not selected.is_file():raise RuntimeError('Select an existing Skate 3 Xbox 360 ISO')
             source = Path(temp)/'disc'
-            extractor = core.dependency(base/'tools', 'extract-xiso', core.XISO_URL, core.XISO_SHA, report)
+            extractor = core.xiso_extractor(base, report)
             with (Path(temp)/'extract.log').open('w') as log:
                 core.run([extractor, '-x', selected, '-d', source], log, report)
         else:
             source = source_directory(selected, require_core=not refresh)
         stage = core._install(iso, base, game_exe, report, game_root=source, refresh=refresh,
-                             finalize=lambda stage: prepare(source, stage/'assets', report))
+                             finalize=lambda stage: (prepare(source, stage/'assets', report),
+                                                     game_audio(source, stage, report)))
         return stage
 
 

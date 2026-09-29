@@ -1,6 +1,6 @@
 //! Bounded ZIP extraction. A session cache never overwrites another package.
 use std::{collections::{BTreeMap, BTreeSet}, io::{Read, Write}, path::{Path, PathBuf}};
-const LIMIT: u64 = 64 * 1024 * 1024;
+const LIMIT: u64 = 512 * 1024 * 1024;
 
 #[derive(Default)]
 pub(crate) struct Cache {

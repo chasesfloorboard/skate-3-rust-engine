@@ -96,8 +96,61 @@ fn suspend(
     }
 }
 
+/// In a kart the marker holds the kart's spot: placing and returning work as
+/// on foot, a return moves the kart, and one set from a kart puts the skater
+/// on a board there when returned to on foot.
+#[allow(clippy::too_many_arguments)]
+fn kart(
+    session: &mut SessionMarker,
+    vehicles: &mut crate::modding::vehicles::Vehicles,
+    position: Vec3,
+    heading: f32,
+    (modifier, set, held): (bool, bool, bool),
+    input: &ControllerInput,
+    map: &CurrentMap,
+    physics: &GamePhysics,
+    validation: &validation::Validation,
+    audio: &mut MessageWriter<SessionMarkerAudio>,
+) {
+    let (sin, cos) = heading.sin_cos();
+    let transform = [[cos, 0., -sin, 0.], [0., 1., 0., 0.], [sin, 0., cos, 0.], [position.x, position.y, position.z, 0.]];
+    session.can_place = modifier && validation.check(physics.world(), transform[3]);
+    session.can_return = session.marker.is_some_and(|m| m.generation == map.generation);
+    session.visible = modifier;
+    if set && session.last_batch != input.consumed_batches {
+        if session.can_place {
+            session.marker = Some(Marker { transform, on_board: true, foot_forward: false, generation: map.generation });
+            audio.write(SessionMarkerAudio(0x0d6c_88a3_b91c_828f));
+        } else {
+            audio.write(SessionMarkerAudio(0x66b3_afe3_b602_918c));
+        }
+    }
+    session.last_batch = input.consumed_batches;
+    let distance = session.marker.map_or(0., |m| position.distance(Vec3::from_slice(&m.transform[3][..3])));
+    let usable = session.can_return;
+    while session.ui_time >= 1. / 60. {
+        session.ui_time -= 1. / 60.;
+        let step = session.hold.update(held, usable, distance, true);
+        session.progress = step.progress;
+        if step.relocate {
+            if let Some(target) = session.marker {
+                let m = target.transform;
+                let heading = m[2][0].atan2(m[2][2]);
+                match vehicles.relocate_driven(Vec3::new(m[3][0], m[3][1] + 0.3, m[3][2]), heading) {
+                    Ok(()) => audio.write(SessionMarkerAudio(0x7f13_5f9f_d28f_7f21)),
+                    Err(e) => {
+                        warn!("Session marker return rejected: {e}");
+                        session.hold.cancel();
+                        continue;
+                    }
+                };
+            }
+        }
+    }
+}
+
 fn update(
-    vehicles: Res<crate::modding::vehicles::Vehicles>,
+    mut vehicles: ResMut<crate::modding::vehicles::Vehicles>,
     mut session: ResMut<SessionMarker>,
     input: Res<ControllerInput>,
     map: Res<CurrentMap>,
@@ -107,15 +160,20 @@ fn update(
     replay: Res<crate::replay::Replay>,
     mut audio: MessageWriter<SessionMarkerAudio>,
 ) {
-    if vehicles.occupied() {session.blocked_until_release = true;return;}
     if replay.active {
         return;
     }
+    let driving = vehicles.driving();
+    if vehicles.occupied() && driving.is_none() {session.blocked_until_release = true;return;}
     let (modifier, set, held) = input.session_marker_actions();
     if session.blocked_until_release {
         if !modifier {
             session.blocked_until_release = false;
         }
+        return;
+    }
+    if let Some((position, heading)) = driving {
+        kart(&mut session, &mut vehicles, position, heading, (modifier, set, held), &input, &map, &physics, &validation, &mut audio);
         return;
     }
     let p = &skater.player_input.physical;

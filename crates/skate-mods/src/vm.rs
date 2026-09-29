@@ -10,12 +10,47 @@ use std::{
         atomic::{AtomicUsize, Ordering},
     },
 };
+/// Kart-style assembly for a spawned vehicle: package-relative .glb models
+/// replacing the definition's body, fitted to every named wheel, and seated
+/// in place of the player while driving.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct VehicleParts {
+    #[serde(default)] pub body: Option<String>,
+    #[serde(default)] pub wheels: Option<String>,
+    /// Wheel model radius (m), so it can be scaled to each wheel's radius.
+    #[serde(default)] pub wheel_radius: Option<f32>,
+    #[serde(default)] pub driver: Option<String>,
+    /// "kart" (default), "bike" (two centred wheels, leaning into turns,
+    /// straddled) or "atv" (four wheels, straddled).
+    #[serde(default)] pub layout: Option<String>,
+    /// Seat position overriding the definition's (a body's own cockpit).
+    #[serde(default)] pub seat: Option<[f32; 3]>,
+    /// Bikes: front and rear axle positions along the body (m, +Z forward).
+    #[serde(default)] pub wheel_z: Option<[f32; 2]>,
+}
+impl VehicleParts {
+    fn valid(&self) -> bool {
+        [&self.body, &self.wheels, &self.driver].into_iter().flatten().all(|p| skate_vehicles::package_path(p))
+            && self.wheel_radius.is_none_or(|r| r.is_finite() && (0.01..=5.0).contains(&r))
+            && self.layout.as_deref().is_none_or(|l| matches!(l, "kart" | "bike" | "atv"))
+            && self.seat.is_none_or(|s| s.iter().all(|v| v.is_finite() && v.abs() <= 3.0))
+            && self.wheel_z.is_none_or(|z| z.iter().all(|v| v.is_finite() && v.abs() <= 3.0))
+    }
+    pub fn bike(&self) -> bool {
+        self.layout.as_deref() == Some("bike")
+    }
+    /// Ridden astride: the rider uses "straddle_<clip>" poses when present.
+    pub fn straddled(&self) -> bool {
+        matches!(self.layout.as_deref(), Some("bike" | "atv"))
+    }
+}
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Command {
     NetworkState { key: String, #[serde(default)] value: Value },
     VehicleTune { key:String, tuning:skate_vehicles::VehicleTuning },
-    VehicleSpawn { key:String, definition:String, position:[f32;3], heading:f32 },
+    VehicleSpawn { key:String, definition:String, position:[f32;3], heading:f32, #[serde(default)] parts:Option<VehicleParts> },
     VehicleRemove { key:String }, VehicleEnter { key:String }, VehicleExit { key:String },
     VehicleReset { key:String, position:[f32;3], heading:f32 },
     VehicleControl { key:String, controls:skate_vehicles::Controls },
@@ -53,7 +88,7 @@ impl Command {
         match self {
             Self::NetworkState { key, value } => crate::schema::valid_id(key) && serde_json::to_vec(value).is_ok_and(|v| v.len() <= 512),
             Self::VehicleTune{key,tuning} => crate::schema::valid_id(key) && tuning.valid(),
-            Self::VehicleSpawn{key,definition,position,heading} => crate::schema::valid_id(key) && skate_vehicles::package_path(definition) && point(position) && heading.is_finite(),
+            Self::VehicleSpawn{key,definition,position,heading,parts} => crate::schema::valid_id(key) && skate_vehicles::package_path(definition) && point(position) && heading.is_finite() && parts.as_ref().is_none_or(VehicleParts::valid),
             Self::VehicleReset{key,position,heading} => crate::schema::valid_id(key) && point(position) && heading.is_finite(),
             Self::VehicleControl{key,controls} => crate::schema::valid_id(key) && controls.valid(),
             Self::VehicleRemove{key}|Self::VehicleEnter{key}|Self::VehicleExit{key} => crate::schema::valid_id(key),

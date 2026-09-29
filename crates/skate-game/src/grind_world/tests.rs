@@ -147,3 +147,29 @@ fn malformed_native_counts_and_inverted_authored_bounds_are_errors() {
     rail.native.as_mut().unwrap()[28+80..28+84].copy_from_slice(&2f32.to_le_bytes());
     assert!(spline::build_rails(&[rail]).is_err());
 }
+
+#[test]
+fn moving_prop_edges_are_queried_and_keep_their_index_as_props_move() {
+    let mut provider = StaticProvider::new(None).unwrap();
+    let bench = |x: f32| Some([
+        [[x, 0.5, 0.], [x + 2., 0.5, 0.]], [[x + 2., 0.5, 0.], [x + 2., 0.5, 0.5]],
+        [[x + 2., 0.5, 0.5], [x, 0.5, 0.5]], [[x, 0.5, 0.5], [x, 0.5, 0.]],
+    ]);
+    provider.set_moving(&[None, bench(0.)]);
+    // The second slot's edges follow the first slot's four inactive ones.
+    let hits = provider.query([-1., 0., -1.], [3., 1., 1.]).unwrap();
+    assert_eq!(hits, vec![4, 5, 6, 7]);
+    assert_eq!(provider.primitives()[4].start[..3], [0., 0.5, 0.]);
+    let owner = provider.primitives()[4].owner;
+    assert!(provider.spline_guids(owner).is_some());
+    assert!(provider.metadata(4).is_some());
+    // Moved: same indices, new positions, old spot no longer matches.
+    provider.set_moving(&[None, bench(10.)]);
+    assert!(provider.query([-1., 0., -1.], [3., 1., 1.]).unwrap().is_empty());
+    assert_eq!(provider.query([9., 0., -1.], [13., 1., 1.]).unwrap(), vec![4, 5, 6, 7]);
+    assert_eq!(provider.primitives()[4].owner, owner);
+    // Knocked over (no grindable face): inactive but still allocated.
+    provider.set_moving(&[None, None]);
+    assert!(provider.query([9., 0., -1.], [13., 1., 1.]).unwrap().is_empty());
+    assert_eq!(provider.primitives().len(), 8);
+}

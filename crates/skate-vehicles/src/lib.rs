@@ -49,6 +49,8 @@ pub struct Simulation {
     pub world: PhysicsWorld,
     pub vehicles: BTreeMap<u64, Vehicle>,
     next: u64,
+    /// Kinematic obstacles (ramp props) by caller key.
+    obstacles: BTreeMap<u64, RigidBodyHandle>,
 }
 impl Default for Simulation {
     fn default() -> Self {
@@ -56,10 +58,29 @@ impl Default for Simulation {
             world: PhysicsWorld::default(),
             vehicles: BTreeMap::new(),
             next: 1,
+            obstacles: BTreeMap::new(),
         }
     }
 }
 impl Simulation {
+    /// A moving obstacle vehicles drive on (a ramp prop): the convex hull of
+    /// `points` in its own frame, kinematic, posed with `move_obstacle`.
+    pub fn add_obstacle(&mut self, key: u64, points: &[[f32; 3]]) -> Result<(), String> {
+        if self.obstacles.contains_key(&key) { return Ok(()); }
+        let points: Vec<Vector> = points.iter().map(|p| Vector::from_array(*p)).collect();
+        let collider = ColliderBuilder::convex_hull(&points).ok_or("Obstacle hull is degenerate")?.friction(1.);
+        let (handle, _) = self.world.insert(RigidBodyBuilder::kinematic_position_based(), collider);
+        self.obstacles.insert(key, handle);
+        Ok(())
+    }
+    pub fn move_obstacle(&mut self, key: u64, position: [f32; 3], rotation: [f32; 4]) {
+        if let Some(&handle) = self.obstacles.get(&key) {
+            if let Some(body) = self.world.bodies.get_mut(handle) {
+                body.set_next_kinematic_position(Pose::from_parts(Vector::from_array(position), Rotation::from_array(rotation).normalize()));
+            }
+        }
+    }
+    pub fn has_obstacle(&self, key: u64) -> bool { self.obstacles.contains_key(&key) }
     pub fn ground(&mut self, triangles: impl Iterator<Item = [[f32; 3]; 3]>) -> Result<(), String> {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
@@ -179,7 +200,8 @@ impl Simulation {
                 );
                 v.controller.update_vehicle(h, queries);
                 handling::tires(v, &mut self.world.bodies, &self.world.colliders, h);
-                assists::apply(v, &mut self.world.bodies, h);
+                let landing = assists::landing(v, &self.world);
+                assists::apply(v, &mut self.world.bodies, h, landing);
             }
             // Capture after suspension/tire impulses so crash delta-v measures the
             // collision solve, not the normal driving forces preceding it.

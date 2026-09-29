@@ -31,5 +31,7 @@ fn meter(@builtin(local_invocation_index) id: u32) {
         // Native evaluator ticks per frame; adapt to a 30 Hz time basis here.
         state.x=clamp(state.x*pow(factor,settings.timing.x*30.0),settings.tuning.y,settings.tuning.z);
         state.y=average;
+        // Night amount forwarded to the tone pass.
+        state.w=settings.timing.z;
     }
 }

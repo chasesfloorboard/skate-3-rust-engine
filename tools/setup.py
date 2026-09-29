@@ -5,6 +5,23 @@ import argparse,os,queue,runpy,sys,threading,traceback
 ROOT=Path(getattr(sys,'_MEIPASS',Path(__file__).resolve().parents[1]))
 sys.path.insert(0,str(ROOT))
 
+def choose_source(window,filedialog):
+    title='Select your Skate 3 default.xex or Xbox 360 ISO'
+    if os.name!='nt':
+        # Prefer the desktop's own file chooser; Tk's Linux dialog is minimal.
+        import shutil,subprocess
+        from tools.asset_pipeline.install import system_env
+        for command in (['zenity','--file-selection','--title',title,'--file-filter','Skate 3 game | default.xex *.iso *.ISO'],
+                        ['kdialog','--title',title,'--getopenfilename',str(Path.home()),'default.xex *.iso *.ISO|Skate 3 game']):
+            if shutil.which(command[0]):
+                try:
+                    result=subprocess.run(command,capture_output=True,text=True,env=system_env())
+                except OSError:continue
+                # Exit code 1 is Cancel in both; anything else means it did not run.
+                if result.returncode in (0,1):return result.stdout.strip()
+    return filedialog.askopenfilename(parent=window,title=title,
+        filetypes=[('Skate 3 game','default.xex *.iso *.ISO'),('Skate 3 executable','default.xex'),('Xbox 360 ISO','*.iso *.ISO')])
+
 def main():
     if len(sys.argv)>1 and sys.argv[1]=='--character-import':
         # Keep the importer inside the already versioned setup payload: even
@@ -37,11 +54,15 @@ def main():
     window=tk.Tk()
     window.title('Skate 3 Rust Engine setup')
     window.geometry('700x420');window.resizable(False,False)
-    icon=ROOT/'docs/images/skating-crab.ico'
-    if icon.is_file():window.iconbitmap(str(icon))
+    if os.name=='nt':
+        icon=ROOT/'docs/images/skating-crab.ico'
+        if icon.is_file():window.iconbitmap(str(icon))
+    else:
+        icon=ROOT/'docs/images/skating-crab.png'
+        if icon.is_file():window.iconphoto(True,tk.PhotoImage(file=str(icon)))
     frame=ttk.Frame(window,padding=24);frame.pack(fill='both',expand=True)
     ttk.Label(frame,text='Update game assets' if updating else 'Set up Skate 3 Rust Engine',font=('Segoe UI',20)).pack(anchor='w',pady=(0,16))
-    ttk.Label(frame,text=('Asset version changes: '+(', '.join(sorted(changed)) or 'checking prepared content')+'.\nOnly changed or incomplete groups will be prepared again.\nYour previous character data remains until preparation succeeds.\nSelect your Skate 3 default.xex (or ISO) to continue.\nKeep the game data beside default.xex.') if updating else 'Select your Skate 3 Xbox 360 ISO, or default.xex inside an\nextracted game folder. Keep the game data beside default.xex.\nSetup prepares the skater, customiser, animations and disc maps.\nNo other apps need installing.\n\nISO extraction needs internet access. Allow free disk space\nand time for the first conversion.',
+    ttk.Label(frame,text=('Asset version changes: '+(', '.join(sorted(changed)) or 'checking prepared content')+'.\nOnly changed or incomplete groups will be prepared again.\nYour previous character data remains until preparation succeeds.\nSelect your Skate 3 default.xex (or ISO) to continue.\nKeep the game data beside default.xex.') if updating else 'Select your Skate 3 Xbox 360 ISO, or default.xex inside an\nextracted game folder. Keep the game data beside default.xex.\nSetup prepares the skater, customiser, animations and disc maps.\nNo other apps need installing.\n\n'+('ISO extraction needs internet access. ' if os.name=='nt' else 'ISO extraction needs about 8 GB of temporary space. ')+'Allow free disk space\nand time for the first conversion.',
               font=('Segoe UI',11),justify='left').pack(anchor='w')
     status=tk.StringVar(value='Choose your game to begin.')
     ttk.Label(frame,textvariable=status,wraplength=600).pack(anchor='w',pady=(18,8))
@@ -49,8 +70,7 @@ def main():
     messages=queue.Queue();running=False;success=False
     def start():
         nonlocal running
-        iso=filedialog.askopenfilename(parent=window,title='Select your Skate 3 default.xex or Xbox 360 ISO',
-            filetypes=[('Skate 3 game','default.xex *.iso'),('Skate 3 executable','default.xex'),('Xbox 360 ISO','*.iso')])
+        iso=choose_source(window,filedialog)
         if not iso:return
         button.config(state='disabled');running=True;progress.start()
         def work():

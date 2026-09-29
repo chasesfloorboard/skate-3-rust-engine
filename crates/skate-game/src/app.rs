@@ -98,6 +98,21 @@ pub(crate) fn build(
             .chain(),
     )
     .add_plugins(crate::fps_overlay::FpsOverlayPlugin)
+    .add_plugins((crate::ambience::AmbiencePlugin, crate::board_audio::BoardAudioPlugin, crate::music::MusicPlugin, crate::menu_skin::MenuSkinPlugin))
+    .add_plugins(crate::prop_material::PropMaterialPlugin)
+    .add_plugins(crate::dropper::DropperPlugin)
+    .init_resource::<crate::props::PropColliders>()
+    .add_systems(PreUpdate, crate::props::refresh)
+    .add_systems(FixedUpdate, crate::props::simulate.after(crate::app::SimulationSet::Physics))
+    .add_systems(PostUpdate, crate::props::sync_pieces.before(bevy::transform::TransformSystems::Propagate))
+    .add_systems(Update, (crate::props::debug, crate::props::ramp_obstacles))
+    .add_systems(Update, crate::street_lights::update)
+    .add_systems(Update, crate::day_cycle::advance.after(crate::map_render::advance_day))
+    // Skinned character parts keep their bind-pose bounds while animating, so
+    // frustum culling could hide a head or shoe at some camera angles.
+    .add_systems(PostUpdate, |mut commands: Commands, skins: Query<Entity, (With<bevy::mesh::skinning::SkinnedMesh>, Without<bevy::camera::visibility::NoFrustumCulling>)>| {
+        for entity in &skins { commands.entity(entity).insert(bevy::camera::visibility::NoFrustumCulling); }
+    })
     .add_plugins((
         crate::retail_render::RetailRenderPlugin,
         input::InputPlugin,
@@ -117,6 +132,8 @@ pub(crate) fn build(
     ));
     app.add_plugins((crate::session_marker::SessionMarkerPlugin, crate::customiser::CustomiserPlugin));
     app.add_plugins(crate::custom_models::CustomModelsPlugin);
+    app.add_plugins(crate::jiggle::JigglePlugin);
+    app.add_plugins(crate::movies::MoviesPlugin);
     app.add_plugins(crate::modding::ModdingPlugin);
     crate::teleport_menu::install(&mut app);
     app.add_plugins(crate::updater::UpdaterPlugin);

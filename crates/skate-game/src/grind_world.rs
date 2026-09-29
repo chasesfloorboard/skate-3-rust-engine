@@ -106,7 +106,7 @@ mod spline;
 mod provider;
 mod octree;
 pub(crate) use spline::{primitives, PrimitiveMetadata};
-pub(crate) use provider::{SourceIdentity, StaticProvider};
+pub(crate) use provider::{SourceIdentity, StaticProvider, MOVING_EDGES};
 
 /// Retain the archive's relocatable Pegasus representation, including all 120
 /// authored bytes per segment. Omitted runtime pointers are rebuilt as offsets.

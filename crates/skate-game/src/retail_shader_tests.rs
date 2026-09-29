@@ -85,7 +85,15 @@ fn validate(bindless: bool, prepass: bool, extras: &[&str]) -> naga::Module {
         ),
         (
             "frame",
-            "#define_import_path bevy_pbr::mesh_view_bindings\nstruct View {view_from_world:mat4x4<f32>,viewport:vec4<f32>,world_position:vec3<f32>,padding:f32}\nstruct Light {flags:u32}\nstruct Lights {n_directional_lights:u32,directional_lights:array<Light,10>}\n@group(0) @binding(0) var<uniform> view:View;\n@group(0) @binding(1) var<storage> lights:Lights;",
+            "#define_import_path bevy_pbr::mesh_view_bindings\nstruct View {view_from_world:mat4x4<f32>,viewport:vec4<f32>,world_position:vec3<f32>,padding:f32}\nstruct Light {flags:u32}\nstruct Lights {n_directional_lights:u32,directional_lights:array<Light,10>}\n@group(0) @binding(0) var<uniform> view:View;\n@group(0) @binding(1) var<storage> lights:Lights;\nstruct ClusterableObject {position_radius:vec4<f32>,color_inverse_square_range:vec4<f32>,light_custom_data:vec4<f32>,flags:u32}\nstruct ClusterableObjects {data:array<ClusterableObject>}\n@group(0) @binding(2) var<storage> clusterable_objects:ClusterableObjects;",
+        ),
+        (
+            "types",
+            "#define_import_path bevy_pbr::mesh_view_types\nconst POINT_LIGHT_FLAGS_SPOT_LIGHT_Y_NEGATIVE: u32 = 2u;",
+        ),
+        (
+            "clustering",
+            "#define_import_path bevy_pbr::clustered_forward\nstruct ClusterableObjectIndexRanges {first_point_light_index_offset:u32,first_spot_light_index_offset:u32,first_reflection_probe_index_offset:u32}\nfn fragment_cluster_index(frag:vec2<f32>,view_z:f32,is_orthographic:bool)->u32 {return 0u;}\nfn unpack_clusterable_object_index_ranges(cluster:u32)->ClusterableObjectIndexRanges {return ClusterableObjectIndexRanges(0u,0u,0u);}\nfn get_clusterable_object_id(index:u32)->u32 {return index;}",
         ),
         (
             "shadows",

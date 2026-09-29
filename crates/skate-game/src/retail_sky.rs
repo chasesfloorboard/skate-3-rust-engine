@@ -11,7 +11,20 @@ pub(crate) struct SkyParams {
     // anchor height, scene exposure, sky multiplier, sun angular scale (0 disables).
     pub settings: Vec4,
     pub sun_direction: Vec4,
+    /// Player sky colour: rgb multiplier, a = desaturation (see SKY_PRESETS).
+    pub tint: Vec4,
+    /// Day cycle (day_cycle.rs): x = dusk warmth, y = night sky, z = seconds, w = tone-pass night.
+    pub cycle: Vec4,
 }
+/// (name, rgb multiplier, desaturation) for the Day & Night "Sky colour" row.
+pub(crate) const SKY_PRESETS: [(&str, [f32; 3], f32); 6] = [
+    ("Authored", [1.0, 1.0, 1.0], 0.0),
+    ("Sunset", [1.45, 0.78, 0.52], 0.15),
+    ("Dusk Purple", [1.0, 0.62, 1.3], 0.2),
+    ("Overcast", [0.85, 0.9, 0.95], 0.8),
+    ("Clear Blue", [0.72, 0.95, 1.35], 0.0),
+    ("Toxic Green", [0.7, 1.35, 0.6], 0.3),
+];
 
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
 pub(crate) struct RetailSkyMaterial {
@@ -182,6 +195,8 @@ pub(crate) fn spawn_sky(
     let mut params = SkyParams {
         settings: Vec4::new(165., 2.5, 1., 0.),
         sun_direction: Vec4::ZERO,
+        tint: Vec4::new(1., 1., 1., 0.),
+        cycle: Vec4::ZERO,
     };
     if let Some(env) = &sky.environment {
         params.settings = Vec4::new(env.anchor_height, 2.5, env.multiplier, env.sun_scale);

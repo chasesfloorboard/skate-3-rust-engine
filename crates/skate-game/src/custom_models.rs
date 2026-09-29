@@ -27,8 +27,23 @@ pub(crate) struct Entry {
     pub name: String,
     #[serde(default)]
     native: Option<NativeCharacter>,
+    /// Keeps its own proportions (tools/mk8_character.py): stock animation
+    /// rotations on its bone lengths, hips lowered by this ratio.
+    #[serde(default)]
+    proportions: Option<Proportions>,
     #[serde(skip)]
     asset_prefix: String,
+}
+#[derive(Clone, Deserialize)]
+struct Proportions {
+    hips_ratio: f32,
+    /// Newer entries (tools/mk8_character.py): leg length and ankle heights.
+    #[serde(default)]
+    leg_ratio: Option<f32>,
+    #[serde(default)]
+    ankle: Option<f32>,
+    #[serde(default)]
+    stock_ankle: Option<f32>,
 }
 impl Entry {
     fn asset_path(&self, file: &str) -> String {
@@ -93,12 +108,28 @@ pub(crate) struct CustomModels {
     pending: Option<Pending>,
     active_root: Option<Entity>,
     stock_visibility: Vec<(Entity, Visibility)>,
+    /// Stock body meshes hidden under a character riding the player's board.
+    stock_meshes: Vec<(Entity, Visibility)>,
     import: Option<Import>,
     status: String,
     selected: usize,
     scroll: f32,
     filter: usize,
     dirty: bool,
+}
+impl CustomModels {
+    /// (id, name) of every character in the library, for the customiser's
+    /// Model page, and the one in use.
+    pub(crate) fn choices(&self) -> (Vec<(String, String)>, Option<&str>) {
+        let mut list: Vec<_> = self.entries.iter().map(|e| (e.id.clone(), e.name.clone())).collect();
+        list.sort_by(|a, b| a.1.to_ascii_lowercase().cmp(&b.1.to_ascii_lowercase()));
+        (list, self.active.as_deref())
+    }
+    /// Swap to a library character (None: the player's own skater).
+    pub(crate) fn select(&mut self, id: Option<String>) {
+        self.request = Some(id);
+        self.dirty = true;
+    }
 }
 impl CustomModels {
     pub(crate) fn online_selection(&self) -> Option<(Option<String>, PathBuf)> {
@@ -137,10 +168,30 @@ impl CustomModels {
     }
 }
 pub(crate) fn library_path() -> PathBuf {
-    std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("Skate3RustEngine/custom-characters")
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        return PathBuf::from(local).join("Skate3RustEngine/custom-characters");
+    }
+    // Elsewhere (Linux): the XDG data directory. Earlier builds kept the
+    // library in the temp directory, which is wiped on reboot; carry it over.
+    let data = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+        .unwrap_or_else(std::env::temp_dir);
+    let library = data.join("Skate3RustEngine/custom-characters");
+    let old = std::env::temp_dir().join("Skate3RustEngine/custom-characters");
+    if !library.exists() && old.is_dir() {
+        if let Some(parent) = library.parent() { let _ = std::fs::create_dir_all(parent); }
+        if std::fs::rename(&old, &library).is_err() { let _ = copy_tree(&old, &library); }
+    }
+    library
+}
+fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() { copy_tree(&entry.path(), &target)?; } else { std::fs::copy(entry.path(), target)?; }
+    }
+    Ok(())
 }
 pub(crate) fn register_source(app: &mut App) {
     let cache = crate::multiplayer::appearance::cache_directory().to_owned();
@@ -247,6 +298,7 @@ impl Plugin for CustomModelsPlugin {
             pending: None,
             active_root: None,
             stock_visibility: vec![],
+            stock_meshes: vec![],
             import: None,
             status: String::new(),
             selected: 0,
@@ -385,9 +437,9 @@ fn start_import(directory: &Path, reference: &Path) -> Result<Import, String> {
         .map_err(|e| e.to_string())?
         .parent()
         .ok_or("Missing game directory")?
-        .join("support/skate3setup.exe");
+        .join(format!("support/skate3setup{}", std::env::consts::EXE_SUFFIX));
     if !executable.is_file() {
-        return Err("Character importer is missing. Restore support/skate3setup.exe from the complete Windows package.".into());
+        return Err("Character importer is missing. Restore support/skate3setup from the complete release package.".into());
     }
     let jobs = directory.join("jobs");
     std::fs::create_dir_all(&jobs).map_err(|e| e.to_string())?;
@@ -500,6 +552,8 @@ fn publish(
     nodes: Query<(&Name, &Transform)>,
     parents: Query<&ChildOf>,
     mut scenes: Query<(Entity, &ChildOf, &mut Visibility), With<SceneRoot>>,
+    mesh_names: Query<(Entity, &Name), (With<Mesh3d>, Without<SceneRoot>)>,
+    mut mesh_visibility: Query<&mut Visibility, (With<Mesh3d>, Without<SceneRoot>)>,
 ) {
     let Ok(player) = roots.single() else {
         return;
@@ -516,6 +570,9 @@ fn publish(
                 // Visibility was owned by the alternate character while active.
                 // Reapply the current outfit even if its saved JSON is unchanged.
                 restore_stock(&mut state, &mut parts, &mut animation, &mut scenes);
+                for (e, visibility) in state.stock_meshes.drain(..) {
+                    if let Ok(mut v) = mesh_visibility.get_mut(e) { *v = visibility; }
+                }
                 state.status = match save_selection(&state.directory, None) {
                     Ok(()) => "Stock skater restored.".into(),
                     Err(e) => format!("Restored; selection could not be saved: {e}"),
@@ -538,6 +595,10 @@ fn publish(
                 commands.entity(player).add_child(root);
                 if let Some(native) = state.entries.iter().find(|e| e.id == id).and_then(|e| e.native.as_ref()) {
                     commands.entity(root).insert(NativeModelRoot(native.key.clone()));
+                } else {
+                    // Imported models are lit like props (probe + sun), not by
+                    // the unlit-at-night PBR path.
+                    commands.entity(root).insert(crate::prop_material::ProbeLit);
                 }
                 state.pending = Some(Pending {
                     id,
@@ -586,12 +647,34 @@ fn publish(
             state.status = format!("{error} Previous character retained.");
         }
         Ok(bindings) => {
-            if state.active_root.is_none() {
-                for (entity, parent, mut visibility) in &mut scenes {
-                    if parent.parent() == player && entity != pending.root {
-                        state.stock_visibility.push((entity, *visibility));
-                        *visibility = Visibility::Hidden;
+            // Start from the stock skater as it was, then hide what the new
+            // character replaces: everything, or (characters that keep their
+            // own proportions) only the body, so the player's board stays.
+            for (e, visibility) in std::mem::take(&mut state.stock_visibility) {
+                if let Ok((_, _, mut v)) = scenes.get_mut(e) { *v = visibility; }
+            }
+            for (e, visibility) in std::mem::take(&mut state.stock_meshes) {
+                if let Ok(mut v) = mesh_visibility.get_mut(e) { *v = visibility; }
+            }
+            let rides_board = state.entries.iter().find(|e| e.id == pending.id).is_some_and(|e| e.proportions.is_some());
+            let previous = state.active_root;
+            let stock: Vec<Entity> = scenes.iter()
+                .filter(|(e, parent, _)| parent.parent() == player && *e != pending.root && Some(*e) != previous)
+                .map(|(e, _, _)| e).collect();
+            for scene in stock {
+                if rides_board {
+                    for (mesh, name) in &mesh_names {
+                        let upper = name.as_str().to_ascii_uppercase();
+                        let board = ["SKATEBOARD", "SKATETRUCK", "SKATEWHEEL", "GRIP"].iter().any(|k| upper.contains(k));
+                        if board || !parents.iter_ancestors(mesh).any(|a| a == scene) { continue; }
+                        if let Ok(mut v) = mesh_visibility.get_mut(mesh) {
+                            state.stock_meshes.push((mesh, *v));
+                            *v = Visibility::Hidden;
+                        }
                     }
+                } else if let Ok((_, _, mut visibility)) = scenes.get_mut(scene) {
+                    state.stock_visibility.push((scene, *visibility));
+                    *visibility = Visibility::Hidden;
                 }
             }
             if let Some(old) = state.active_root.replace(pending.root) {
@@ -603,7 +686,19 @@ fn publish(
             // Seed the new rig before publishing visibility, even when paused.
             let pose:Vec<_>=skater.render_pose.iter().copied().map(crate::animation::native_matrix).collect();
             for (joint,transform) in bindings.pose_transforms(&pose) {commands.entity(joint).insert(transform);}
+            let mut bindings = bindings;
+            if rides_board {
+                let names = &skater.animation.evaluator.frames.bone_names;
+                bindings.carry_board(&animation, names, |e| previous.is_some_and(|r| parents.iter_ancestors(e).any(|a| a == r))
+                    || parents.iter_ancestors(e).any(|a| a == pending.root));
+            }
             *animation = bindings;
+            animation.keep = state.entries.iter().find(|e| e.id == pending.id)
+                .and_then(|e| e.proportions.as_ref()).map(|p| crate::animation::Keep {
+                    leg: p.leg_ratio.unwrap_or(p.hips_ratio).clamp(0.1, 3.0),
+                    ankle: p.ankle.unwrap_or(0.11),
+                    stock_ankle: p.stock_ankle.unwrap_or(0.11),
+                });
             state.active = Some(pending.id.clone());
             state.status = match save_selection(&state.directory, Some(pending.id)) {
                 Ok(()) => "Character equipped. Resume whenever you're ready.".into(),

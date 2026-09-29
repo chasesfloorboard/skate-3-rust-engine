@@ -19,6 +19,8 @@ impl Plugin for CharacterLightingPlugin {
         embedded_asset!(app, "retail_character_common.wgsl");
         let common: Handle<Shader> = bevy::asset::load_embedded_asset!(app.world().resource::<AssetServer>(), "retail_character_common.wgsl");
         app.insert_resource(CharacterShader(common));
+        // Bevy's 2048 default left the skater's dynamic shadows blocky.
+        app.insert_resource(bevy::light::DirectionalLightShadowMap { size: 4096 });
         app.add_plugins(MaterialPlugin::<CharacterMaterial>::default())
             .add_systems(Startup, load)
             .add_systems(PreUpdate, load.after(crate::map_transition::MapTransitionSet).run_if(crate::retail_render::world_changed))
@@ -204,7 +206,8 @@ fn spawn_shadow_sources(commands: &mut Commands, light: Vec3) {
         Transform::default().looking_to(-light, Vec3::Y),
         bevy::light::CascadeShadowConfigBuilder {
             maximum_distance: 100.,
-            first_cascade_far_bound: 10.,
+            // Tight first cascade: skater, board and nearby props stay crisp.
+            first_cascade_far_bound: 6.,
             ..default()
         }
         .build(),
@@ -227,7 +230,9 @@ fn spawn_shadow_sources(commands: &mut Commands, light: Vec3) {
         Transform::default().looking_to(-light, Vec3::Y),
         bevy::light::CascadeShadowConfigBuilder {
             num_cascades: 1,
-            maximum_distance: 24.,
+            // The camera trails the skater by a few metres; a shorter range
+            // spends the map's texels on the skater's own shadow.
+            maximum_distance: 16.,
             ..default()
         }
         .build(),
@@ -358,6 +363,8 @@ fn update(
     // Adapter floor: the local probe's direction-independent ambient term.
     // The native per-frame c8 shadow-colour controller remains unrecovered.
     shadow.approach(sh[0].truncate(), time.delta_secs());
+    // Nearby dynamic props share the skater's probe lighting (retail_world.wgsl).
+    shadow.4 = displayed;
 }
 
 fn publish_sh(materials: &mut Assets<CharacterMaterial>, displayed: [Vec4; 9], changed: &mut Vec<AssetId<CharacterMaterial>>) {
@@ -431,7 +438,7 @@ mod tests {
         });
         world.insert_resource(crate::retail_render::RetailScene(false));
         world.init_resource::<Assets<crate::customiser_material::SkaterMaterial>>();
-        world.insert_resource(crate::retail_render::ShadowState(Vec4::ONE, Vec4::ONE, [Vec4::ONE; 7]));
+        world.insert_resource(crate::retail_render::ShadowState(Vec4::ONE, Vec4::ONE, [Vec4::ONE; 7], Vec4::ZERO, [Vec4::ZERO; 9]));
         let material = Handle::<StandardMaterial>::default();
         let player = world.spawn((
             OriginalCharacterMaterial { material: material.clone(), layers: None },
@@ -502,7 +509,7 @@ mod tests {
             assert!(layers.intersects(&player));
             if light.affects_lightmapped_mesh_diffuse {
                 assert!(!layers.intersects(&terrain));
-                assert_eq!(cascades.bounds, vec![24.]);
+                assert_eq!(cascades.bounds, vec![16.]);
                 assert_eq!(light.shadow_normal_bias, 0.);
                 assert!(light.shadow_depth_bias < 0.005);
                 receivers += 1;

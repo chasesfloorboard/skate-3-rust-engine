@@ -51,9 +51,9 @@ pub(crate) fn asset_root() -> Result<PathBuf, String> {
             return Ok(assets.clone());
         }
     }
-    let setup = root.join("support/skate3setup.exe");
+    let setup = root.join(format!("support/skate3setup{}", std::env::consts::EXE_SUFFIX));
     if !setup.is_file() {
-        return Err("This copy has not been set up. Use the complete Windows package, or --assets DIRECTORY for development.".into());
+        return Err("This copy has not been set up. Use the complete release package, or --assets DIRECTORY for development.".into());
     }
     let mut command = Command::new(setup);
     command.arg("--base").arg(&base).arg("--game-exe").arg(&exe);

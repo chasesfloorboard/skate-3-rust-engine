@@ -1,5 +1,7 @@
 #import bevy_pbr::{forward_io::VertexOutput, mesh_view_bindings as frame}
 #import bevy_pbr::shadows::fetch_directional_shadow
+#import bevy_pbr::clustered_forward as clustering
+#import bevy_pbr::mesh_view_types::POINT_LIGHT_FLAGS_SPOT_LIGHT_Y_NEGATIVE
 
 #import skate_retail::material_bindings as bindings
 #ifdef BINDLESS
@@ -10,6 +12,36 @@
 // authored coordinate system, then return to the flipped texture rows.
 fn scaled_uv(uv: vec2<f32>, scale: f32) -> vec2<f32> {
     return vec2<f32>(uv.x*scale, 1.0-(1.0-uv.y)*scale);
+}
+
+// Dynamic point/spot lights (street_lights.rs, vehicle headlights) on top of
+// the baked lighting: diffuse only, inverse square with Bevy's range falloff.
+// Scaled into the baked lightmap's units by DYNAMIC_LIGHT_SCALE.
+const DYNAMIC_LIGHT_SCALE: f32 = 2.0e-4;
+fn dynamic_lights(frag: vec4<f32>, world: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+    let view_z = (frame::view.view_from_world * vec4<f32>(world, 1.0)).z;
+    let cluster = clustering::fragment_cluster_index(frag.xy, view_z, false);
+    let ranges = clustering::unpack_clusterable_object_index_ranges(cluster);
+    var total = vec3<f32>(0.0);
+    for (var i = ranges.first_point_light_index_offset; i < ranges.first_reflection_probe_index_offset; i += 1u) {
+        let light = &frame::clusterable_objects.data[clustering::get_clusterable_object_id(i)];
+        let to_light = (*light).position_radius.xyz - world;
+        // At least a metre: no blown-out hot spot on whatever sits by the lamp.
+        let d2 = max(dot(to_light, to_light), 1.0);
+        let l = to_light * inverseSqrt(d2);
+        let factor = d2 * (*light).color_inverse_square_range.w;
+        let range = saturate(1.0 - factor * factor);
+        var cone = 1.0;
+        if i >= ranges.first_spot_light_index_offset {
+            var dir = vec3<f32>((*light).light_custom_data.x, 0.0, (*light).light_custom_data.y);
+            dir.y = sqrt(max(0.0, 1.0 - dir.x * dir.x - dir.z * dir.z));
+            if ((*light).flags & POINT_LIGHT_FLAGS_SPOT_LIGHT_Y_NEGATIVE) != 0u { dir.y = -dir.y; }
+            let c = saturate(dot(-dir, l) * (*light).light_custom_data.z + (*light).light_custom_data.w);
+            cone = c * c;
+        }
+        total += (*light).color_inverse_square_range.rgb * saturate(dot(n, l)) * range * range / d2 * cone;
+    }
+    return total * DYNAMIC_LIGHT_SCALE;
 }
 
 @fragment
@@ -74,6 +106,21 @@ fn fragment(i: VertexOutput) -> @location(0) vec4<f32> {
     var alpha = 1.0;
     var lin = vec3<f32>(0.0);
     var baked = lm*lm;
+    if (flags & 32u) == 0u && (fam<=8u || fam==13u) {
+        // No baked lightmap (placed dynamic props). Like the retail character:
+        // local probe irradiance (the skater's, published each frame) plus the
+        // sun; sun shadows below still apply. Day/night moves the sun.
+        let sun_now = select(sun, frame_state.sun.xyz, frame_state.sun.w > 0.5);
+        let ndl = saturate(dot(wn, sun_now));
+        let sh = frame_state.sh;
+        let v = wn;
+        let irr = saturate(sh[0].rgb+v.x*sh[1].rgb+v.y*sh[2].rgb+v.z*sh[3].rgb
+            +v.x*v.z*sh[4].rgb+v.z*v.y*sh[5].rgb+v.y*v.x*sh[6].rgb
+            +(3.0*v.z*v.z-1.0)*sh[7].rgb+(v.x*v.x-v.y*v.y)*sh[8].rgb);
+        let probe = dot(sh[0].rgb, vec3<f32>(1.0)) > 0.0;
+        let sky = 0.5 + 0.5*wn.y;
+        baked = select(vec3<f32>(0.20 + 0.14*sky), irr, probe) + vec3<f32>(0.95,0.90,0.80)*0.75*ndl;
+    }
     if frame_state.shadow.w>0.0 && (fam<=8u || fam==13u) {
         let view_z=(frame::view.view_from_world*i.world_position).z;
         for (var light_id=0u; light_id<frame::lights.n_directional_lights; light_id+=1u) {
@@ -249,6 +296,24 @@ fn fragment(i: VertexOutput) -> @location(0) vec4<f32> {
         if fam >= 7u { alpha = a.a; }
         if fam == 13u { alpha *= alpha; }
     }
+    // Lamps and headlights on lit surfaces: not water or sky layers, and not
+    // foliage (9, 10), so lamps light the street rather than tree crowns.
+    // The tone pass grades night down to ~1% with a blue tint; lamp light is
+    // pre-divided by the grade's brightness only, and its share of the pixel
+    // goes out in alpha (opaque surfaces) so the tone pass leaves that part
+    // untinted and in colour.
+    var lamp_share = 0.0;
+    if fam != 14u && fam != 30u && fam != 31u && fam != 32u && fam != 33u && fam != 9u && fam != 10u {
+        let weights = vec3<f32>(0.2126,0.7152,0.0722);
+        let grade = dot(pow(vec3<f32>(0.010,0.016,0.045), vec3<f32>(max(frame_state.clock.z, 0.0))), weights);
+        var lamp = d*dynamic_lights(i.position, i.world_position.xyz, wn)/grade;
+        // Hot cores go pale, as a bright lamp does; the pool stays warm.
+        let shown = dot(lamp, weights)*grade*p.mode.w;
+        lamp = mix(lamp, vec3<f32>(dot(lamp, weights)), 0.7*smoothstep(0.25, 1.2, shown));
+        let base = dot(lin, weights);
+        lamp_share = dot(lamp, weights)/max(base + dot(lamp, weights), 1e-6);
+        lin += lamp;
+    }
     var f = saturate(length(rpos)*p.fog_ramp.x+p.fog_ramp.y);
     if p.fog_ramp.z != 1.0 { f = pow(max(f,1e-6),p.fog_ramp.z); }
     var fog_a = 1.0+p.fog_color.a*f;
@@ -258,5 +323,7 @@ fn fragment(i: VertexOutput) -> @location(0) vec4<f32> {
     if fam == 8u { xe = min(xe,vec3<f32>(1.0)); }
     if p.foliage_debug.w != 0.0 { return vec4<f32>(p.foliage_debug.rgb, 1.0); }
     if a.a < p.mode.z { discard; }
+    // Opaque surfaces carry 1 - lamp share in alpha for the tone pass.
+    if alpha >= 1.0 && fam != 14u && fam != 32u { return vec4<f32>(xe, 1.0 - lamp_share); }
     return vec4<f32>(xe,alpha);
 }

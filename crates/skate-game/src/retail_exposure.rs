@@ -104,8 +104,11 @@ fn load(config: Res<crate::config::Config>, retail: Res<super::RetailScene>, mut
         }
     }
 }
-fn advance(time: Res<Time>, mut settings: ResMut<Settings>) {
+fn advance(time: Res<Time>, mut settings: ResMut<Settings>, frame: Res<super::ShadowState>) {
     settings.timing.x = time.delta_secs().clamp(0., 0.05);
+    // Day/night grade amount for the tone pass (day_cycle.rs); applied after
+    // metering, so auto-exposure cannot undo it.
+    settings.timing.z = frame.1.z;
 }
 
 #[derive(Resource)]

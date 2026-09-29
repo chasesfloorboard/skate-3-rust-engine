@@ -97,6 +97,7 @@ pub(crate) fn receive(
         definition: state.definition.clone(),
         position: state.position,
         heading: 0.,
+        parts: None,
     };
     let q = Quat::from_array(state.rotation);
     if !spawn.validate()

@@ -175,6 +175,27 @@ pub(crate) fn resume_after_climb(physics: &mut GamePhysics, skater: &mut SkaterR
     Ok(())
 }
 
+/// Riding onto water (surface physics 12): bail into the ragdoll's water
+/// mode, which sinks below the surface and hands off to respawn. The board
+/// raises collision bit 25 and records the water height (82C080D4); the
+/// graph path that consumes it in retail is not ported, so the host starts
+/// the bail directly.
+pub(crate) fn apply_water_bail(physics: &mut GamePhysics, skater: &mut SkaterRuntime) -> Result<bool, String> {
+    if physics.riding.ground.collision_flags & (1 << 25) == 0 {
+        return Ok(false);
+    }
+    if matches!(skater.player_state.current(),
+        PhysicalStateId::WipeoutGround | PhysicalStateId::Teleporting | PhysicalStateId::Sleeping) {
+        return Ok(false);
+    }
+    let processed = &mut skater.player_input.processed;
+    processed.flags_2488 |= 0x4000_0000;
+    processed.collision_scalar_2924 = physics.riding.ground.surface_twelve_height;
+    bevy::log::info!("WATER_BAIL height={:.2}", physics.riding.ground.surface_twelve_height);
+    transition::set(physics, skater, PhysicalStateId::WipeoutGround)?;
+    Ok(true)
+}
+
 /// Vehicle ownership has ended; reset first, then enter the native ragdoll and seed momentum.
 pub(crate) fn apply_vehicle_ejection(physics: &mut GamePhysics, skater: &mut SkaterRuntime) -> Result<bool, String> {
     let Some((velocity, angular)) = skater.teleport_state.take_vehicle_ejection() else { return Ok(false); };

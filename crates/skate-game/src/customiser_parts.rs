@@ -524,6 +524,82 @@ impl Parts {
         self.materials.insert(id.into(), (material, images));
     }
 }
+/// Folder for player deck graphics, beside the executable.
+pub(crate) fn custom_boards_folder() -> Option<std::path::PathBuf> {
+    Some(std::env::current_exe().ok()?.parent()?.join("custom-boards"))
+}
+const DECK_TEMPLATE: &str = "deck-template.png";
+/// The retail deck-graphics model (the SkateBoard part with the most options)
+/// and a retail graphic whose material settings custom decks copy.
+fn deck_template(library: &Library) -> Option<(String, Material)> {
+    let (deck_id, deck) = library.models.iter().filter(|(_, p)| p.slot == "SkateBoard")
+        .max_by_key(|(_, p)| p.materials.len())?;
+    let template = deck.materials.iter().filter_map(|id| library.materials.get(id))
+        .find(|m| !m.flag("ManufacturerID").is_empty())?.clone();
+    Some((deck_id.clone(), template))
+}
+/// Adds one image as a deck graphic listed as "Custom: <file name>". It is
+/// stored content-addressed as a 512x512 PNG under the asset root, so an
+/// edited image gets a fresh texture and id. Returns (deck model, material).
+pub(crate) fn add_custom_board(library: &mut Library, asset_root: &std::path::Path, source: &std::path::Path)
+    -> Result<(String, String), String> {
+    let (deck_id, template) = deck_template(library).ok_or("No retail deck graphics are installed")?;
+    let stem = source.file_stem().and_then(|s| s.to_str()).ok_or("Unsupported file name")?;
+    let bytes = std::fs::read(source).map_err(|e| e.to_string())?;
+    let id = blake3::hash(&bytes).to_hex()[..16].to_owned();
+    let output = asset_root.join("private/custom-boards");
+    let texture = output.join(format!("{id}.png"));
+    if !texture.is_file() {
+        let image = image::load_from_memory(&bytes).map_err(|e| format!("Not a readable image: {e}"))?;
+        std::fs::create_dir_all(&output).map_err(|e| e.to_string())?;
+        image.resize_exact(512, 512, image::imageops::FilterType::Lanczos3)
+            .to_rgba8().save(&texture).map_err(|e| e.to_string())?;
+    }
+    let mut material = template;
+    material.name = format!("Custom: {stem}");
+    material.flags = [("ManufacturerID".to_owned(), "custom".to_owned())].into();
+    material.diffuse = format!("private/custom-boards/{id}.png");
+    library.materials.insert(id.clone(), material);
+    let deck = library.models.get_mut(&deck_id).expect("deck model exists");
+    if !deck.materials.contains(&id) {
+        deck.materials.push(id.clone());
+    }
+    Ok((deck_id, id))
+}
+/// Loads every PNG/JPEG in the custom-boards folder, creating the folder with
+/// a layout template and README on first run.
+fn add_custom_boards(library: &mut Library, asset_root: &std::path::Path) {
+    let Some(folder) = custom_boards_folder() else { return };
+    let Some((_, template)) = deck_template(library) else { return };
+    if !folder.is_dir() {
+        if std::fs::create_dir_all(&folder).is_err() {
+            return;
+        }
+        let _ = std::fs::copy(asset_root.join(&template.diffuse), folder.join(DECK_TEMPLATE));
+        let _ = std::fs::write(folder.join("README.txt"),
+            "Put PNG or JPEG deck graphics here, then restart the game, or use\n\
+             Board > Deck > Add image from computer in the customiser. They appear\n\
+             as \"Custom: <file name>\". deck-template.png shows how a retail graphic\n\
+             is laid out on the texture; images are resized to 512x512.\n");
+    }
+    let Ok(entries) = std::fs::read_dir(&folder) else { return };
+    let mut sources: Vec<_> = entries.filter_map(Result::ok).map(|e| e.path())
+        .filter(|p| p.extension().and_then(|s| s.to_str())
+            .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg")))
+        .filter(|p| p.file_name().is_none_or(|n| n != DECK_TEMPLATE))
+        .collect();
+    sources.sort();
+    let mut added = 0;
+    for source in sources {
+        match add_custom_board(library, asset_root, &source) {
+            Ok(_) => added += 1,
+            Err(error) => warn!("Custom board {} skipped: {error}", source.display()),
+        }
+    }
+    if added > 0 {
+        info!("Custom boards: {added} from {}", folder.display());
+    }
+}
 pub(crate) fn setup(
     mut commands: Commands,
     config: Res<crate::config::Config>,
@@ -535,6 +611,8 @@ pub(crate) fn setup(
     .ok()
     .and_then(|b| serde_json::from_slice::<Library>(&b).ok())
     .unwrap_or_default();
+    let mut library = library;
+    add_custom_boards(&mut library, &config.asset_root);
     let geometry = library
         .models
         .iter()

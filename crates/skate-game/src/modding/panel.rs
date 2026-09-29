@@ -47,6 +47,9 @@ struct Label(String, usize);
 struct ValueLabel(String, usize);
 #[derive(Component)]
 struct Hint(String);
+/// Preview pictures of the mod's choice settings (up to 4 per window).
+#[derive(Component)]
+struct PreviewSlot(String, usize);
 #[derive(Component)]
 struct CollapseLabel(String);
 #[derive(Component, Clone)]
@@ -65,7 +68,7 @@ pub(super) fn install(app: &mut App) {
                 .after(crate::graphics_menu::MenuInput)
                 .before(crate::map_transition::MapTransitionSet),
         )
-        .add_systems(Update, (sync, draw, scroll, scrollbar::update).chain());
+        .add_systems(Update, (sync, draw, previews, scroll, scrollbar::update).chain());
 }
 fn button(parent: &mut ChildSpawnerCommands, text: &str, action: Action) {
     parent
@@ -295,6 +298,21 @@ fn sync(
                                 }
                             });
                             scrollbar::spawn(area, id);
+                        });
+                        body.spawn(Node {
+                            column_gap: px(6.),
+                            flex_shrink: 0.,
+                            justify_content: JustifyContent::Center,
+                            ..default()
+                        })
+                        .with_children(|strip| {
+                            for n in 0..4 {
+                                strip.spawn((
+                                    PreviewSlot(id.clone(), n),
+                                    ImageNode::default(),
+                                    Node { display: Display::None, width: px(160.), height: px(120.), ..default() },
+                                ));
+                            }
                         });
                         body.spawn(Node {
                             column_gap: px(6.),
@@ -659,6 +677,44 @@ fn draw(
                 })
                 .unwrap_or_default();
         }
+    }
+}
+
+/// Each window shows the current picture of every setting that has previews
+/// (a kart body in its style, its tyres), one per distinct file.
+fn previews(
+    mods: Res<Mods>,
+    mut slots: Query<(&PreviewSlot, &mut ImageNode, &mut Node)>,
+    mut images: ResMut<Assets<Image>>,
+    mut cache: Local<BTreeMap<std::path::PathBuf, Option<Handle<Image>>>>,
+) {
+    let mut wanted: BTreeMap<&String, Vec<std::path::PathBuf>> = BTreeMap::new();
+    for (id, p) in &mods.manager.packages {
+        if !p.running() { continue; }
+        let files = wanted.entry(id).or_default();
+        for key in p.manifest.settings.keys() {
+            if let Some(file) = super::menu::preview_file(p, key) {
+                let path = p.root.join(&file);
+                if !files.contains(&path) && files.len() < 4 {
+                    if !cache.contains_key(&path) {
+                        if cache.len() >= 64 {
+                            for (_, h) in std::mem::take(&mut *cache) { if let Some(h) = h { images.remove(&h); } }
+                        }
+                        cache.insert(path.clone(), super::menu::load_preview(&p.root, &file, &mut images));
+                    }
+                    files.push(path);
+                }
+            }
+        }
+    }
+    for (slot, mut image, mut node) in &mut slots {
+        let handle = wanted.get(&slot.0).and_then(|f| f.get(slot.1)).and_then(|path| cache.get(path).cloned().flatten());
+        // Write only on change: touching Node every frame would relayout the UI.
+        let display = if handle.is_some() { Display::Flex } else { Display::None };
+        if let Some(h) = handle {
+            if image.image != h { image.image = h; }
+        }
+        if node.display != display { node.display = display; }
     }
 }
 

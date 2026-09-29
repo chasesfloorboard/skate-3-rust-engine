@@ -18,6 +18,12 @@ def map_workers():
             # Reserve memory for the desktop; each map and its loader can
             # briefly hold several copies of geometry and textures.
             count=min(count,max(1,(memory.available-2*1024**3)//(3*1024**3)))
+    else:
+        try:
+            with open('/proc/meminfo',encoding='ascii') as meminfo:
+                available=next(int(line.split()[1])*1024 for line in meminfo if line.startswith('MemAvailable:'))
+            count=min(count,max(1,(available-2*1024**3)//(3*1024**3)))
+        except (OSError,StopIteration,ValueError):pass
     return count
 XISO_URL='https://github.com/XboxDev/extract-xiso/releases/download/build-202505152050/extract-xiso-Win64_Release.zip'
 XISO_SHA='fec88d03c7efd6205ab09be4abba70c0afd0eb27a5709f0a6235b828ba5ac11e'
@@ -63,9 +69,35 @@ def dependency(cache,name,url,sha,report):
     if executable is None:raise RuntimeError('Missing downloaded tool: '+name)
     return executable
 
+def xiso_extractor(base,report):
+    if os.name=='nt':return dependency(base/'tools','extract-xiso',XISO_URL,XISO_SHA,report)
+    # XboxDev publishes no Linux binary; release packages ship one beside the
+    # setup helper, and source checkouts use one on PATH.
+    found=bundled_tool('extract-xiso')
+    if found is None:raise RuntimeError('extract-xiso is missing. Reinstall the complete package, or select default.xex in an extracted game folder.')
+    return found
+
+def system_env():
+    """Child environment without the PyInstaller bundle's library path, so the
+    game and system tools load the system libraries on Linux."""
+    env=os.environ.copy()
+    if os.name!='nt' and getattr(sys,'frozen',False):
+        original=env.pop('LD_LIBRARY_PATH_ORIG',None)
+        if original is None:env.pop('LD_LIBRARY_PATH',None)
+        else:env['LD_LIBRARY_PATH']=original
+    return env
+
+def bundled_tool(name):
+    """A helper program shipped beside the Linux setup binary, else on PATH."""
+    bundled=Path(sys.executable).parent/name
+    if getattr(sys,'frozen',False) and bundled.is_file():return bundled
+    found=shutil.which(name)
+    return Path(found) if found else None
+
 def run(args,log,report):
     kwargs={'creationflags':subprocess.CREATE_NO_WINDOW} if os.name=='nt' else {}
     external=os.name=='nt' and getattr(sys,'frozen',False) and Path(args[0]).resolve()!=Path(sys.executable).resolve()
+    if os.name!='nt':kwargs['env']=system_env()
     if external:
         # External tools and the game must load their own libraries, not
         # the setup bundle's DLL directory inherited by child processes.
@@ -251,7 +283,7 @@ def _install(iso,base,game_exe,report,game_root=None,refresh=False,finalize=None
         if game_root is None:
             iso=iso.resolve()
             if not iso.is_file() or iso.suffix.lower()!='.iso':raise RuntimeError('Select an Xbox 360 Skate 3 ISO')
-            extractor=dependency(base/'tools','extract-xiso',XISO_URL,XISO_SHA,report)
+            extractor=xiso_extractor(base,report)
             game_root=work/'disc'
             report('Extracting your ISO')
             run([extractor,'-x',iso,'-d',game_root],log,report)

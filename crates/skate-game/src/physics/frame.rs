@@ -115,7 +115,8 @@ pub(super) fn advance(
         skater.offboard_grab.execute_queries(&scene)?;
     }
     let state_before_selection = skater.player_state.current();
-    if vehicle_ejected {
+    let water_bail = !vehicle_ejected && player_state::apply_water_bail(physics, skater)?;
+    if vehicle_ejected || water_bail {
         // Vehicle ejection is a host transition that must retain WipeoutGround,
         // so it bypasses the native state selector. ProcessInput has already
         // prepared this tick's grind work, however, and native PostInput is its

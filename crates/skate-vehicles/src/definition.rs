@@ -26,6 +26,9 @@ pub struct VehicleDefinition {
     pub tire_grip: f32,
     pub ground_stability: f32,
     pub air_control: f32,
+    /// Airborne, turn the vehicle to land square on the surface ahead of it
+    /// (0 off .. 1 full); player air control still adds on top.
+    pub landing_assist: f32,
     pub wheels: Vec<WheelDefinition>,
     pub seat: [f32; 3],
     pub exit: [f32; 3],
@@ -114,6 +117,7 @@ impl Default for VehicleDefinition {
             tire_grip: 1.3,
             ground_stability: 0.,
             air_control: 0.,
+            landing_assist: 0.,
             wheels: vec![],
             seat: [0., 0.25, 0.],
             exit: [1.8, 0., 0.],
@@ -172,6 +176,7 @@ impl VehicleDefinition {
             || !range(self.tire_grip, 0.1, 20.)
             || !range(self.ground_stability, 0., 1.)
             || !range(self.air_control, 0., 10.)
+            || !range(self.landing_assist, 0., 1.)
             || !point(&self.seat, 10.)
             || !point(&self.exit, 10.)
             || !range(self.camera_distance, 2., 30.)
@@ -229,6 +234,7 @@ pub struct VehicleTuning {
     pub brake_impulse: Option<f32>,
     pub steering_angle: Option<f32>,
     pub tire_grip: Option<f32>,
+    pub landing_assist: Option<f32>,
 }
 impl VehicleTuning {
     pub fn apply(&self, definition: &VehicleDefinition) -> Result<VehicleDefinition, String> {
@@ -249,6 +255,9 @@ impl VehicleTuning {
         if let Some(v) = self.tire_grip {
             d.tire_grip = v;
         }
+        if let Some(v) = self.landing_assist {
+            d.landing_assist = v;
+        }
         d.validate()?;
         Ok(d)
     }
@@ -260,6 +269,7 @@ impl VehicleTuning {
             self.brake_impulse.map(|x| (x, 0., 10000.)),
             self.steering_angle.map(|x| (x, 0.01, 1.2)),
             self.tire_grip.map(|x| (x, 0.1, 20.)),
+            self.landing_assist.map(|x| (x, 0., 1.)),
         ]
         .into_iter()
         .flatten()

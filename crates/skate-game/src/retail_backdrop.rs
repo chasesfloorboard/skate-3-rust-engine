@@ -47,5 +47,8 @@ fn spawn_package(
         return;
     }
     info!("SKATE_BACKDROP: {name} {folder} triangles={}", map.geometry.indices.len() / 3);
-    crate::skate_world::spawn(&map, commands, meshes, materials, retail_materials, images, &super::MaterialTuning::load(asset_root));
+    // Movable props get one entity per prop so physics can move them.
+    let pieces = (folder == "native-props").then(|| crate::props::pieces(asset_root, name)).flatten();
+    crate::skate_world::spawn_with_pieces(&map, commands, meshes, materials, retail_materials, images,
+        &super::MaterialTuning::load(asset_root), pieces.as_ref());
 }

@@ -208,14 +208,40 @@ mod exchange_tests {
 }
 
 impl GamePhysics {
+    /// Moving grind edges (props.rs). The provider is shared with the air
+    /// trajectory; its handle is taken back for the in-place update so the
+    /// static data is never copied.
+    pub(crate) fn set_moving_grinds(
+        &mut self,
+        skater: &mut SkaterRuntime,
+        edges: &[Option<[[[f32; 3]; 2]; crate::grind_world::MOVING_EDGES]>],
+    ) {
+        let lent = skater.trajectory.grind_world_slot().take();
+        drop(lent);
+        if let Some(provider) = std::sync::Arc::get_mut(&mut self.grind_world) {
+            provider.set_moving(edges);
+        }
+        *skater.trajectory.grind_world_slot() = Some(std::sync::Arc::clone(&self.grind_world));
+    }
+}
+
+impl GamePhysics {
     pub(crate) fn set_gesture_preferences(&mut self, gestures: Option<[u32; 4]>) {
-        self.animation_profile.gesture_selections = gestures.filter(|g| g.iter().all(|v| *v < 37));
+        self.animation_profile.gesture_selections = Some(gestures.filter(|g| g.iter().all(|v| *v < 37)).unwrap_or([0, 1, 2, 3]));
     }
     pub(crate) fn set_equipment_preferences(&mut self, truck: f32, wheel: f32) {
         if truck.is_finite() && wheel.is_finite() {
             self.animation_profile.truck_tightness = truck.clamp(0.0, 1.0);
             self.animation_profile.wheel_hardness = wheel.clamp(0.0, 1.0);
         }
+    }
+    /// World contacts for arbitrary volumes (dynamic props), using the board's
+    /// query and retention settings. Normals point from the world toward the volume.
+    pub(crate) fn query_world(
+        &mut self,
+        volumes: &[skate_core::physics::board_world::BoardWorldVolume],
+    ) -> Vec<skate_core::physics::board_step::BoardCollision> {
+        self.world.query_primitives(volumes, self.query, self.retention).to_vec()
     }
     pub(crate) fn set_difficulty(&mut self, difficulty: crate::difficulty::Difficulty) {
         // Actor publication carries this selector into the next physical packet.
@@ -557,9 +583,13 @@ fn present(
         return;
     }
     let Some((previous, current, alpha)) = history.view(&replay, time.overstep_fraction()) else { return; };
+    // Test hook: SKATE_DEBUG_FACE_TURN=1 turns the rendered model to face the
+    // camera (a character check; physics and the camera are unaffected).
+    let turn = std::env::var_os("SKATE_DEBUG_FACE_TURN").is_some();
     for mut root in &mut roots {
         *root = crate::presentation::blend(previous.root, current.root,
             alpha);
+        if turn { root.rotate_local_y(std::f32::consts::PI); }
     }
 }
 

@@ -79,6 +79,12 @@ impl Clips {
         }
         Ok(Self(file.clips))
     }
+    /// `name`, or its "straddle_" variant for riders astride when the file has one.
+    pub fn variant(&self, name: Option<&String>, straddled: bool) -> Option<String> {
+        let name = name?;
+        let alt = format!("straddle_{name}");
+        Some(if straddled && self.0.contains_key(&alt) { alt } else { name.clone() })
+    }
     pub fn duration(&self, name: Option<&String>) -> f32 {
         name.and_then(|n| self.0.get(n))
             .map_or(0., |c| c.frames.len() as f32 / c.fps)

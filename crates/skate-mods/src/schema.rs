@@ -27,6 +27,13 @@ pub struct Setting {
     pub step: Option<f64>,
     #[serde(default)]
     pub choices: Vec<String>,
+    /// Choice settings: package-relative PNG previews shown in the mod menu,
+    /// keyed by the values of `preview_from` joined with '|' (default: this
+    /// setting's own value).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub previews: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preview_from: Vec<String>,
 }
 pub fn valid_id(s: &str) -> bool {
     let stem = s.split('.').next().unwrap_or("");
@@ -101,10 +108,24 @@ impl Manifest {
             }
             if s.kind == "choice"
                 && (s.choices.is_empty()
-                    || s.choices.len() > 32
+                    || s.choices.len() > 64
                     || s.choices.iter().any(|s| s.len() > 128))
             {
                 return Err(format!("{key}: invalid choices"));
+            }
+            if !s.previews.is_empty() || !s.preview_from.is_empty() {
+                let safe = |p: &str| {
+                    p.len() <= 256 && p.ends_with(".png") && !p.contains(':') && !p.contains('\\')
+                        && std::path::Path::new(p).components().all(|c| matches!(c, std::path::Component::Normal(_)))
+                };
+                if s.kind != "choice"
+                    || s.previews.len() > 4096
+                    || s.previews.iter().any(|(k, p)| k.len() > 512 || !safe(p))
+                    || s.preview_from.len() > 4
+                    || s.preview_from.iter().any(|k| !self.settings.contains_key(k))
+                {
+                    return Err(format!("{key}: invalid previews"));
+                }
             }
             if !s.accepts(&s.default) {
                 return Err(format!("{key}: invalid type/default"));

@@ -24,6 +24,8 @@ pub(crate) struct PlayerControls {
     //None means the native offboard remap gate did not run, not missing camera.
     offboard_axes: Option<[f32; 2]>,
     gestures: Option<crate::input::gesture_input::GestureInput>,
+    /// D-pad Up/Down/Left/Right held on the previous tick, for gesture starts.
+    dpad_held: [bool; 4],
 }
 impl Default for PlayerControls {
     fn default() -> Self {
@@ -41,6 +43,7 @@ impl Default for PlayerControls {
             preferences: PushPreferences::default(),
             offboard_axes: None,
             gestures: None,
+            dpad_held: [false; 4],
         }
     }
 }
@@ -182,6 +185,21 @@ impl PlayerControls {
         self.action_intents.clear();
         for intent in &self.intents {
             self.action_intents.insert(intent.name, intent.value);
+        }
+        // Character gestures (emotes). ActionGraph_OnBoard copies these AG
+        // intents into the motion graph (CreateMGIntentFromAGIntent) for
+        // CharacterGesture; nothing else emits them. LB + D-pad is reserved for
+        // session markers (input.cfg SessionMarkerSet/Use).
+        let marker_modifier = map.value(64 + 8) > 0.5;
+        for (i, direction) in ["Up", "Down", "Left", "Right"].into_iter().enumerate() {
+            let held = !marker_modifier && map.value(64 + 10 + i as u32) > 0.5;
+            if held {
+                if !self.dpad_held[i] {
+                    self.action_intents.insert(&format!("Gesture{direction}Start"), 1.0);
+                }
+                self.action_intents.insert(&format!("Gesture{direction}Held"), 1.0);
+            }
+            self.dpad_held[i] = held;
         }
         self.ticks += 1;
     }

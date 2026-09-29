@@ -20,6 +20,9 @@ struct Entry {
     maximum: Option<f64>,
     initial: Option<f64>,
     step: Option<f64>,
+    /// A command instead of a patch, e.g. "import_deck".
+    #[serde(default)]
+    action: Option<String>,
 }
 #[derive(Resource, Default)]
 pub(crate) struct Navigation {
@@ -44,6 +47,9 @@ pub(crate) struct Customiser {
     settings: PathBuf,
     pub status: String,
     pub redraw: bool,
+    extras: Vec<Entry>,
+    /// Running desktop file chooser for a deck graphic import.
+    picker: Option<std::process::Child>,
 }
 impl Customiser {
     pub(crate) fn begin(&mut self) {
@@ -299,6 +305,95 @@ fn page(label: impl Into<String>, children: Vec<Entry>) -> Entry {
         ..default()
     }
 }
+/// Opens the desktop's file chooser without blocking the game. Its stdout
+/// is the chosen path; cancelling prints nothing.
+fn open_image_picker() -> Result<std::process::Child, String> {
+    use std::process::{Command, Stdio};
+    let mut candidates = Vec::new();
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut dialog = Command::new("powershell");
+        dialog.args(["-NoProfile", "-STA", "-Command",
+            "Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.OpenFileDialog; \
+             $d.Title = 'Choose a deck graphic'; $d.Filter = 'Images|*.png;*.jpg;*.jpeg'; \
+             if ($d.ShowDialog() -eq 'OK') { [Console]::Out.Write($d.FileName) }"]);
+        dialog.creation_flags(0x08000000);
+        candidates.push(dialog);
+    }
+    #[cfg(not(windows))]
+    {
+        let title = "Choose a deck graphic";
+        let mut zenity = Command::new("zenity");
+        zenity.args(["--file-selection", "--title", title, "--file-filter",
+            "Images | *.png *.jpg *.jpeg *.PNG *.JPG *.JPEG"]);
+        candidates.push(zenity);
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+        let mut kdialog = Command::new("kdialog");
+        kdialog.args(["--title", title, "--getopenfilename", &home, "image/png image/jpeg"]);
+        candidates.push(kdialog);
+    }
+    for mut command in candidates {
+        if let Ok(child) = command.stdout(Stdio::piped()).stderr(Stdio::null()).spawn() {
+            return Ok(child);
+        }
+    }
+    Err("No file chooser found. Install zenity or kdialog, or copy images into the custom-boards folder.".into())
+}
+/// When the chooser exits: copy the image into custom-boards, add it to the
+/// library, rebuild the menu and equip it on the draft.
+fn finish_deck_import(state: &mut Customiser, parts: &mut Parts, asset_root: &std::path::Path) {
+    let Some(child) = state.picker.as_mut() else { return };
+    if matches!(child.try_wait(), Ok(None)) {
+        return;
+    }
+    let child = state.picker.take().unwrap();
+    state.redraw = true;
+    let chosen = child.wait_with_output().ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+        .filter(|path| !path.is_empty());
+    let Some(chosen) = chosen.map(PathBuf::from) else {
+        state.status = "No image chosen.".into();
+        return;
+    };
+    let result = (|| -> Result<(String, String, String), String> {
+        let folder = crate::customiser_parts::custom_boards_folder().ok_or("No game folder")?;
+        std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+        let name = chosen.file_name().ok_or("Unsupported file name")?;
+        let mut target = folder.join(name);
+        if chosen.parent() != Some(folder.as_path()) {
+            // Keep an existing image with the same name; number the new one.
+            let stem = chosen.file_stem().and_then(|s| s.to_str()).unwrap_or("deck").to_owned();
+            let extension = chosen.extension().and_then(|s| s.to_str()).unwrap_or("png").to_owned();
+            let mut n = 2;
+            while target.exists() && std::fs::read(&target).ok() != std::fs::read(&chosen).ok() {
+                target = folder.join(format!("{stem}-{n}.{extension}"));
+                n += 1;
+            }
+            std::fs::copy(&chosen, &target).map_err(|e| e.to_string())?;
+        }
+        let (deck, material) = crate::customiser_parts::add_custom_board(&mut parts.library, asset_root, &target)?;
+        let label = parts.library.materials[&material].name.clone();
+        Ok((deck, material, label))
+    })();
+    match result {
+        Ok((deck, material, label)) => {
+            state.index = menu(&parts.library, state.extras.clone());
+            let mut profile = state.draft.clone();
+            merge(&mut profile, &json!({"selections":{"SkateBoard":{"asset_id":deck,"material_id":material}},"colours":{"SkateBoard":Value::Null}}));
+            match parts.resolve(&profile) {
+                Ok(p) => {
+                    state.draft = p;
+                    state.status = format!("Added and equipped {label}. Choose Done to keep it.");
+                }
+                Err(e) => state.status = e,
+            }
+            let count = state.visible().len();
+            state.selected = state.selected.min(count.saturating_sub(1));
+        }
+        Err(e) => state.status = format!("Could not add image: {e}"),
+    }
+}
 fn choice(label: impl Into<String>, patch: Value) -> Entry {
     Entry {
         label: label.into(),
@@ -406,6 +501,13 @@ fn menu(lib: &Library, extras: Vec<Entry>) -> Entry {
                     ..default()
                 })
                 .collect();
+            if slot == "SkateBoard" {
+                entries.insert(0, Entry {
+                    label: "Add image from computer…".into(),
+                    action: Some("import_deck".into()),
+                    ..default()
+                });
+            }
         }
         page(title, entries)
     };
@@ -641,7 +743,9 @@ fn menu(lib: &Library, extras: Vec<Entry>) -> Entry {
         ],
     );
     for e in extras {
-        if e.label == "Style" {
+        if e.label == "Model" {
+            root.children.push(e);
+        } else if e.label == "Style" {
             root.children[3].children.extend(e.children);
         } else if let Some(i) = root.children[0]
             .children
@@ -677,7 +781,7 @@ fn setup(mut commands: Commands, config: Res<crate::config::Config>, parts: Res<
             }
         }
     }
-    let extras = std::fs::read(
+    let extras: Vec<Entry> = std::fs::read(
         crate::customiser_parts::asset_directory(&config.asset_root).join("extra-menu.json"),
     )
     .ok()
@@ -688,7 +792,7 @@ fn setup(mut commands: Commands, config: Res<crate::config::Config>, parts: Res<
         enabled,
         just_opened: false,
         preview_yaw: 0.,
-        index: menu(&parts.library, extras),
+        index: menu(&parts.library, extras.clone()),
         path: vec![],
         selected: 0,
         page_size: 7,
@@ -697,6 +801,8 @@ fn setup(mut commands: Commands, config: Res<crate::config::Config>, parts: Res<
         settings,
         status,
         redraw: true,
+        extras,
+        picker: None,
     });
     commands.spawn((
         Root,
@@ -767,11 +873,14 @@ fn interact(
     mut wheel: MessageReader<MouseWheel>,
     mut typing: MessageReader<bevy::input::keyboard::KeyboardInput>,
     mut state: ResMut<Customiser>,
-    parts: Res<Parts>,
+    mut parts: ResMut<Parts>,
     mut pause: ResMut<crate::graphics_menu::Menu>,
     buttons: Query<(&Interaction, &Row)>,
     adjustments: Query<(&Interaction, &Adjust)>,
+    config: Res<crate::config::Config>,
+    mut models: Option<ResMut<crate::custom_models::CustomModels>>,
 ) {
+    finish_deck_import(&mut state, &mut parts, &config.asset_root);
     if !state.open {
         wheel.clear();
         typing.clear();
@@ -779,6 +888,18 @@ fn interact(
     }
     if state.just_opened {
         state.just_opened = false;
+        // The Model page lists the character library as it is now.
+        let mut extras = state.extras.clone();
+        if let Some(models) = models.as_ref() {
+            let (list, active) = models.choices();
+            let mark = |on: bool, label: &str| if on { format!("{label}  (in use)") } else { label.to_owned() };
+            let mut entries = vec![Entry { label: mark(active.is_none(), "Your skater"), action: Some("model:".into()), ..default() }];
+            entries.extend(list.into_iter().map(|(id, name)| Entry {
+                label: mark(active == Some(id.as_str()), &name), action: Some(format!("model:{id}")), ..default()
+            }));
+            extras.push(Entry { label: "Model".into(), children: entries, ..default() });
+        }
+        state.index = menu(&parts.library, extras);
         wheel.clear();
         typing.clear();
         return;
@@ -935,6 +1056,20 @@ fn interact(
             state.path.push(i);
             state.selected = 0;
             state.status.clear();
+        } else if let (Some(id), Some(models)) = (entry.action.as_deref().and_then(|a| a.strip_prefix("model:")), models.as_mut()) {
+            // A library character replaces the body; the board stays yours.
+            models.select((!id.is_empty()).then(|| id.to_owned()));
+            state.status = format!("Model: {}", entry.label.trim_end_matches("  (in use)"));
+        } else if entry.action.as_deref() == Some("import_deck") {
+            if state.picker.is_none() {
+                match open_image_picker() {
+                    Ok(child) => {
+                        state.picker = Some(child);
+                        state.status = "Choose an image in the file chooser (it may open behind the game).".into();
+                    }
+                    Err(e) => state.status = e,
+                }
+            }
         } else if let Some(note) = entry.note {
             state.status = note;
         } else {
@@ -996,7 +1131,8 @@ fn preferences(
     if let Some(style) = models.native_style() {
         skater.animation.motion.playback_context.pro_skater = skate_core::animation::skeleton_input::name::encode(style.as_bytes());
         skater.animation.motion.animation.posture.set_profile(0);
-        physics.set_gesture_preferences(None);
+        // Pros have no saved gesture set: use ResetGestureSet's defaults.
+        physics.set_gesture_preferences(Some([0, 1, 2, 3]));
     }
 }
 pub(crate) fn apply_preferences(
@@ -1008,7 +1144,7 @@ pub(crate) fn apply_preferences(
         scalar(profile, "truck", 0.7) as f32,
         scalar(profile, "wheel", 0.7) as f32,
     );
-    physics.set_gesture_preferences(profile["gestures"].as_object().map(|g| {
+    physics.set_gesture_preferences(Some(profile["gestures"].as_object().map_or([0, 1, 2, 3], |g| {
         // ResetGestureSet824FA730 marks all 37 entries available and selects
         // the first four in table order for Up,Down,Left,Right.
         std::array::from_fn(|i| {
@@ -1016,7 +1152,7 @@ pub(crate) fn apply_preferences(
                 .and_then(Value::as_u64)
                 .unwrap_or(i as u64) as u32
         })
-    }));
+    })));
     animation.set_customisation(
         scalar(profile, "stance", 1.) as u32,
         scalar(profile, "style", 0.) as u32,
@@ -1343,7 +1479,7 @@ mod tests {
             open: true, enabled: true, just_opened: false, preview_yaw: 0.,
             index: Entry::default(), path: vec![], selected: 0, page_size: 6,
             search: String::new(), draft: json!({"selections":{},"morphs":{}}),
-            settings: PathBuf::new(), status: String::new(), redraw: false,
+            settings: PathBuf::new(), status: String::new(), redraw: false, extras: vec![], picker: None,
         });
         let player = world.spawn(crate::world::PlayerRoot).id();
         let stock = world.spawn((SceneRoot(default()), Visibility::Inherited, ChildOf(player))).id();
@@ -1418,6 +1554,8 @@ mod tests {
                 settings: PathBuf::new(),
                 status: String::new(),
                 redraw: true,
+                extras: extras.clone(),
+                picker: None,
             };
             assert_eq!(state.visible().len(), 4);
             let body = 0;

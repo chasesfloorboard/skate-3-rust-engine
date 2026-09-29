@@ -50,7 +50,7 @@ sdk.trainer = {}
 function sdk.trainer.apply(tuning) submit{kind="trainer",tuning=tuning} end
 
 sdk.vehicle = {}
-function sdk.vehicle.spawn(key,definition,position,heading) submit{kind="vehicle_spawn",key=key,definition=definition,position=position,heading=heading or 0} end
+function sdk.vehicle.spawn(key,definition,position,heading,parts) submit{kind="vehicle_spawn",key=key,definition=definition,position=position,heading=heading or 0,parts=parts} end
 function sdk.vehicle.remove(key) submit{kind="vehicle_remove",key=key} end
 function sdk.vehicle.enter(key) submit{kind="vehicle_enter",key=key} end
 function sdk.vehicle.exit(key) submit{kind="vehicle_exit",key=key} end

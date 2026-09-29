@@ -22,6 +22,18 @@ struct Instance {
     clips: animations::Clips,
     last_control: f32,
     definition_path: String,
+    /// Seated driver model (parts.driver), shown in place of the player.
+    driver_model: Option<Entity>,
+    /// Bike layout (parts.layout): the body and rider lean into turns.
+    bike: bool,
+    /// Ridden astride (bikes, ATVs): straddle_ rider poses.
+    straddled: bool,
+    /// Current visual lean (radians about the forward axis, + leans left).
+    lean: f32,
+    /// Bike wheelie (radians, nose up about the rear axle) and that axle's
+    /// position along the body.
+    wheelie: f32,
+    rear_z: f32,
 }
 struct Driver {
     owner: String,
@@ -53,8 +65,43 @@ pub(crate) struct Vehicles {
     rendered_motion: BTreeMap<u64, interpolation::Motion>,
 }
 impl Vehicles {
+    /// Every simulated vehicle as a box: (centre, rotation, half extents,
+    /// velocity). props.rs knocks props with these.
+    pub(crate) fn boxes(&self) -> Vec<(Vec3, Quat, Vec3, Vec3)> {
+        self.simulation.vehicles.values().map(|v| {
+            let body = &self.simulation.world.bodies[v.body];
+            (Vec3::from_array(body.translation().to_array()), Quat::from_array(body.rotation().to_array()),
+                Vec3::from_array(v.definition.half_extents), Vec3::from_array(body.linvel().to_array()))
+        }).collect()
+    }
+    pub(crate) fn has_vehicles(&self) -> bool { !self.owned.is_empty() }
+    pub(crate) fn has_obstacle(&self, key: u64) -> bool { self.simulation.has_obstacle(key) }
+    pub(crate) fn add_obstacle(&mut self, key: u64, points: &[[f32; 3]]) -> Result<(), String> {
+        self.simulation.add_obstacle(key, points)
+    }
+    pub(crate) fn move_obstacle(&mut self, key: u64, position: [f32; 3], rotation: [f32; 4]) {
+        self.simulation.move_obstacle(key, position, rotation);
+    }
     pub(crate) fn occupied(&self) -> bool {
         self.driver.is_some()
+    }
+    /// The driven kart's body position and heading, while seated in it
+    /// (session markers are placed and returned to from the kart).
+    pub(crate) fn driving(&self) -> Option<(Vec3, f32)> {
+        let d = self.driver.as_ref().filter(|d| d.phase == "driving")?;
+        let i = self.owned.get(&(d.owner.clone(), d.key.clone()))?;
+        let (p, q) = self.simulation.pose(i.id)?;
+        let forward = Quat::from_array(q) * Vec3::Z;
+        Some((Vec3::from_array(p), forward.x.atan2(forward.z)))
+    }
+    /// Moves the driven kart (a session marker return).
+    pub(crate) fn relocate_driven(&mut self, position: Vec3, heading: f32) -> Result<(), String> {
+        let d = self.driver.as_ref().filter(|d| d.phase == "driving").ok_or("Not driving")?;
+        let id = self.owned.get(&(d.owner.clone(), d.key.clone())).ok_or("Unknown vehicle")?.id;
+        self.simulation.reset(id, position.to_array(), heading)?;
+        self.previous_motion.remove(&id);
+        self.rendered_motion.remove(&id);
+        Ok(())
     }
     pub(super) fn player_pose(&self) -> Option<([f32; 3], f32)> {
         let d = self.driver.as_ref()?;
@@ -116,6 +163,43 @@ pub(super) fn snapshot(world: &World) -> Value {
     }
     Value::Object(out)
 }
+/// A bike's chassis transform tilted by its lean about the ground line
+/// under its centre.
+fn leaned(body: Transform, i: &Instance, def: &VehicleDefinition) -> Transform {
+    if !i.bike || (i.lean == 0.0 && i.wheelie == 0.0) {
+        return body;
+    }
+    let ground = -(def.half_extents[1] + def.suspension_length);
+    let pivot = Vec3::Y * ground;
+    let tilt = Transform::from_translation(pivot)
+        * Transform::from_rotation(Quat::from_rotation_z(-i.lean))
+        * Transform::from_translation(-pivot);
+    // Wheelie: nose up about the rear tyre's contact with the ground.
+    let axle = Vec3::new(0.0, ground, i.rear_z);
+    let wheelie = Transform::from_translation(axle)
+        * Transform::from_rotation(Quat::from_rotation_x(-i.wheelie))
+        * Transform::from_translation(-axle);
+    body * tilt * wheelie
+}
+
+/// Seconds for the convertible-style hop into or out of the seat.
+const HOP: f32 = 0.3;
+
+/// Where the driver lands when hopping out: the definition's exit offset
+/// dropped to the floor (else the spot they got in from).
+fn exit_spot(v: &Vehicles, id: u64, fallback: ([f32; 3], f32)) -> ([f32; 3], f32) {
+    let Some((p, q)) = v.simulation.pose(id) else { return fallback };
+    let q = Quat::from_array(q);
+    let candidate = (Vec3::from_array(p) + q * Vec3::from_array(v.simulation.vehicles[&id].definition.exit)).to_array();
+    match v.simulation.floor(candidate) {
+        Some(floor) => {
+            let forward = q * Vec3::Z;
+            ([floor[0], floor[1] + 0.15, floor[2]], forward.x.atan2(forward.z))
+        }
+        None => fallback,
+    }
+}
+
 fn event(v: &mut Vehicles, owner: &str, key: &str, name: &str) {
     v.events.push(json!({"name":name,"owner":owner,"key":key}));
 }
@@ -127,16 +211,7 @@ fn exit_now(world: &mut World, v: &mut Vehicles, forced: bool) -> Result<(), Str
     let mut heading = driver.return_heading;
     if !forced {
         if let Some(i) = v.owned.get(&(driver.owner.clone(), driver.key.clone())) {
-            if let Some((p, q)) = v.simulation.pose(i.id) {
-                let q = Quat::from_array(q);
-                let offset = Vec3::from_array(v.simulation.vehicles[&i.id].definition.exit);
-                let candidate = (Vec3::from_array(p) + q * offset).to_array();
-                if let Some(floor) = v.simulation.floor(candidate) {
-                    position = [floor[0], floor[1] + 0.15, floor[2]];
-                    let forward = q * Vec3::Z;
-                    heading = forward.x.atan2(forward.z);
-                }
-            }
+            (position, heading) = exit_spot(v, i.id, (position, heading));
         }
     }
     if let Some(i)=v.owned.get(&(driver.owner.clone(),driver.key.clone())) {v.simulation.set_occupied(i.id,false);}
@@ -278,6 +353,7 @@ pub(super) fn command(
                 definition,
                 position,
                 heading,
+                parts,
                 ..
             } => {
                 if v.owned.contains_key(&owned_key) {
@@ -287,10 +363,16 @@ pub(super) fn command(
                     return Err("Vehicle limit: 8 per mod, 32 total".into());
                 }
                 let bytes = skate_mods::read_bounded(root, &definition, 128 * 1024)?;
-                let def: VehicleDefinition =
+                let mut def: VehicleDefinition =
                     serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
                 def.validate()?;
-                let bytes = skate_mods::read_bounded(root, &def.model, 32 * 1024 * 1024)?;
+                let parts = parts.unwrap_or_default();
+                // A body's own cockpit replaces the definition's seat.
+                if let Some(seat) = parts.seat {
+                    def.seat = seat;
+                }
+                let body_path = parts.body.clone().unwrap_or_else(|| def.model.clone());
+                let bytes = skate_mods::read_bounded(root, &body_path, 32 * 1024 * 1024)?;
                 validate_glb(&bytes)?;
                 let clips = animations::Clips::load(
                     root,
@@ -302,21 +384,22 @@ pub(super) fn command(
                         .frames
                         .bone_names,
                 )?;
-                let model = root
-                    .join(&def.model)
-                    .canonicalize()
-                    .map_err(|e| e.to_string())?;
+                // Package-relative model -> asset scene, confined to the mod packages.
                 let package_root = super::package_root()
                     .canonicalize()
                     .map_err(|e| e.to_string())?;
-                let relative = model
-                    .strip_prefix(package_root)
-                    .map_err(|_| "Model outside mod packages")?
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                let scene = world
-                    .resource::<AssetServer>()
-                    .load(GltfAssetLabel::Scene(0).from_asset(format!("mods://{relative}")));
+                let load_scene = |world: &World, path: &str| -> Result<Handle<Scene>, String> {
+                    let model = root.join(path).canonicalize().map_err(|e| format!("{path}: {e}"))?;
+                    let relative = model
+                        .strip_prefix(&package_root)
+                        .map_err(|_| "Model outside mod packages")?
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    Ok(world.resource::<AssetServer>().load(GltfAssetLabel::Scene(0).from_asset(format!("mods://{relative}"))))
+                };
+                let scene = load_scene(world, &body_path)?;
+                let wheel_scene = parts.wheels.as_deref().map(|p| load_scene(world, p)).transpose()?;
+                let driver_scene = parts.driver.as_deref().map(|p| load_scene(world, p)).transpose()?;
                 ensure_ground(world, &mut v)?;
                 let id = v.simulation.spawn(def.clone(), position, heading)?;
                 let entity = world
@@ -324,8 +407,29 @@ pub(super) fn command(
                         Transform::from_translation(Vec3::from_array(position))
                             .with_rotation(Quat::from_rotation_y(heading)),
                         Visibility::default(),
+                        crate::prop_material::ProbeLit,
                     ))
                     .id();
+                // Headlights at the front corners (+Z is forward), dipped a
+                // little so they pool on the road ahead.
+                let half = Vec3::from_array(def.half_extents);
+                for side in [-1.0f32, 1.0] {
+                    world.spawn((
+                        SpotLight {
+                            color: Color::srgb(1.0, 0.96, 0.85),
+                            intensity: 3.0e6,
+                            range: 35.0,
+                            radius: 0.05,
+                            shadows_enabled: false,
+                            inner_angle: 0.25,
+                            outer_angle: 0.5,
+                            ..default()
+                        },
+                        Transform::from_xyz(side * half.x * 0.6, half.y + 0.25, half.z + 0.1)
+                            .looking_to(Vec3::new(0.0, -0.12, 1.0), Vec3::Y),
+                        ChildOf(entity),
+                    ));
+                }
                 world.spawn((
                     SceneRoot(scene.clone()),
                     Transform::from_translation(Vec3::from_array(def.model_offset))
@@ -333,6 +437,50 @@ pub(super) fn command(
                         .with_scale(Vec3::splat(def.model_scale)),
                     ChildOf(entity),
                 ));
+                // Chosen tyres on every named wheel, at the suspension's rest
+                // height, scaled to the physics radius; right-side hubs face out.
+                if let Some(wheel_scene) = &wheel_scene {
+                    let model_radius = parts.wheel_radius.unwrap_or(0.33);
+                    // Bikes: one tyre on the centre line per axle, driven by
+                    // that axle's first physics wheel (which it is named after).
+                    let mounts: Vec<_> = if parts.bike() {
+                        [true, false].into_iter().enumerate().filter_map(|(end, front)| {
+                            let axle: Vec<_> = def.wheels.iter().filter(|w| w.steering == front).collect();
+                            let first = axle.first()?;
+                            let mut position = axle.iter().map(|w| Vec3::from_array(w.position)).sum::<Vec3>() / axle.len() as f32;
+                            position.x = 0.0;
+                            // The body's own wheel gaps, when the parts name them.
+                            if let Some(z) = parts.wheel_z { position.z = z[end]; }
+                            Some((first.node.clone(), position.to_array(), first.radius))
+                        }).collect()
+                    } else {
+                        def.wheels.iter().map(|w| (w.node.clone(), w.position, w.radius)).collect()
+                    };
+                    for (node, position, radius) in mounts {
+                        let Some(node) = &node else { continue };
+                        let mount = Vec3::from_array(position) - Vec3::Y * def.suspension_length;
+                        let yaw = if position[0] < 0.0 { std::f32::consts::PI } else { 0.0 };
+                        let hub = world.spawn((
+                            Name::new(node.clone()),
+                            Transform::from_translation(mount),
+                            Visibility::default(),
+                            ChildOf(entity),
+                        )).id();
+                        world.spawn((
+                            SceneRoot(wheel_scene.clone()),
+                            Transform::from_rotation(Quat::from_rotation_y(yaw))
+                                .with_scale(Vec3::splat(radius / model_radius)),
+                            ChildOf(hub),
+                        ));
+                    }
+                }
+                // A seated driver model rides in place of the player.
+                let driver_model = driver_scene.map(|driver| world.spawn((
+                    SceneRoot(driver),
+                    Transform::from_translation(Vec3::from_array(def.seat)),
+                    Visibility::Hidden,
+                    ChildOf(entity),
+                )).id());
                 let clock = v.clock;
                 v.owned.insert(
                     owned_key,
@@ -343,6 +491,15 @@ pub(super) fn command(
                         clips,
                         last_control: clock,
                         definition_path: definition,
+                        driver_model,
+                        bike: parts.bike(),
+                        straddled: parts.straddled(),
+                        lean: 0.0,
+                        wheelie: 0.0,
+                        rear_z: parts.wheel_z.map_or_else(|| {
+                            let rear: Vec<_> = def.wheels.iter().filter(|w| !w.steering).map(|w| w.position[2]).collect();
+                            if rear.is_empty() { -0.6 } else { rear.iter().sum::<f32>() / rear.len() as f32 }
+                        }, |z| z[1]),
                     },
                 );
                 event(&mut v, owner, &key, "vehicle_spawned");
@@ -419,15 +576,22 @@ pub(super) fn command(
                     }
                     if d.phase != "driving" { return Ok(()); }
                 }
+                // Jumping out at speed: thrown clear into a bail, carrying the
+                // kart's momentum (the crash ejection path).
                 if let Some(i) = v.owned.get(&owned_key) {
-                    if v.simulation.vehicles[&i.id]
-                        .controller
-                        .current_vehicle_speed
-                        .abs()
-                        > 3.
-                    {
-                        event(&mut v, owner, &key, "vehicle_exit_blocked");
-                        return Ok(());
+                    let id = i.id;
+                    if v.driver.is_some() && v.simulation.vehicles[&id].controller.current_vehicle_speed.abs() > 3. {
+                        let body = &v.simulation.world.bodies[v.simulation.vehicles[&id].body];
+                        let q = Quat::from_array(body.rotation().to_array());
+                        let seat = Vec3::from_array(body.translation().to_array()) + q * Vec3::from_array(v.simulation.vehicles[&id].definition.seat);
+                        let velocity = Vec3::from_array(body.linvel().to_array()) + Vec3::Y * 2.5 + q * Vec3::X * 1.5;
+                        let ejection = skate_vehicles::Ejection {
+                            position: (seat + Vec3::Y * 0.3).to_array(),
+                            velocity: velocity.to_array(),
+                            angular_velocity: (q * Vec3::new(0.0, 0.0, -3.0)).to_array(),
+                            reason: "jumped_out",
+                        };
+                        return eject_now(world, &mut v, ejection);
                     }
                 }
                 if let Some(d) = &mut v.driver {
@@ -528,13 +692,9 @@ fn tick(world: &mut World) {
             }
         }
         if let Some((owner, key, phase)) = driver_info {
-            if let Some(i) = v.owned.get(&(owner.clone(), key.clone())) {
-                let def = &v.simulation.vehicles[&i.id].definition;
-                let duration = i.clips.duration(if phase == "entering" {
-                    def.animations.enter.as_ref()
-                } else {
-                    def.animations.exit.as_ref()
-                });
+            if v.owned.contains_key(&(owner.clone(), key.clone())) {
+                // A quick hop over the side replaces long enter/exit clips.
+                let duration = HOP;
                 if let Some(d) = &mut v.driver {
                     d.time += dt;
                 }
@@ -597,10 +757,25 @@ pub(crate) fn present(world: &mut World) {
                 |previous| previous.sample(&current, alpha));
             Some((id, sample))
         }).collect();
-        for i in v.owned.values() {
+        // Right stick held down: wheelie on a moving bike.
+        let wheelie_held = world.resource::<crate::input::ControllerInput>().raw_input().right[1] < -0.5
+            || world.resource::<ButtonInput<KeyCode>>().pressed(KeyCode::ControlLeft);
+        let driven = v.driver.as_ref().filter(|d| d.phase == "driving").map(|d| (d.owner.clone(), d.key.clone()));
+        let v = &mut *v;
+        for (key, i) in v.owned.iter_mut() {
             if let Some(sample) = v.rendered_motion.get(&i.id) {
+                if i.bike {
+                    // Lean into turns with speed (visual only; the camera and
+                    // physics keep the upright chassis).
+                    let car = &v.simulation.vehicles[&i.id];
+                    let speed = (car.controller.current_vehicle_speed / 8.0).clamp(0.0, 1.0);
+                    let target = 0.45 * car.controls.steering * speed;
+                    i.lean += (target - i.lean) * (1.0 - (-6.0 * dt).exp());
+                    let up = if wheelie_held && driven.as_ref() == Some(key) && car.controller.current_vehicle_speed > 2.0 { 0.4 } else { 0.0 };
+                    i.wheelie += (up - i.wheelie) * (1.0 - (-(if up > i.wheelie { 3.0 } else { 6.0 }) * dt).exp());
+                }
                 if let Some(mut t) = world.get_mut::<Transform>(i.entity) {
-                    *t = sample.body;
+                    *t = leaned(sample.body, i, &v.simulation.vehicles[&i.id].definition);
                 }
             }
         }
@@ -663,17 +838,27 @@ pub(crate) fn present(world: &mut World) {
             }
         }
         v.pose = None;
+        // Seated driver models show only while their kart is being driven.
+        let driven = v.driver.as_ref().map(|d| (d.owner.clone(), d.key.clone()));
+        for (key, instance) in &v.owned {
+            let Some(model) = instance.driver_model else { continue };
+            let show = driven.as_ref() == Some(key) && v.driver.as_ref().is_some_and(|d| d.phase == "driving");
+            if let Some(mut vis) = world.get_mut::<Visibility>(model) {
+                vis.set_if_neq(if show { Visibility::Inherited } else { Visibility::Hidden });
+            }
+        }
         let Some(d) = &v.driver else {
             return;
         };
         let Some(i) = v.owned.get(&(d.owner.clone(), d.key.clone())) else {
             return;
         };
+        let replaced = i.driver_model.is_some() && d.phase == "driving";
         let car = &v.simulation.vehicles[&i.id];
         let a = &car.definition.animations;
+        let hopping = d.phase != "driving";
         let name = match d.phase {
-            "entering" => a.enter.as_ref(),
-            "exiting" => a.exit.as_ref(),
+            _ if hopping => a.idle.as_ref().or(a.drive.as_ref()),
             _ => {
                 if car.controls.brake > 0.2 {
                     a.brake.as_ref()
@@ -689,11 +874,29 @@ pub(crate) fn present(world: &mut World) {
         .or(a.drive.as_ref());
         let target_steering=car.controls.steering;
         let steering=v.steering_visual+(target_steering-v.steering_visual)*(1.-(-12.*dt).exp());
-        let pose = i.clips.pose(name, d.time, d.phase == "driving");
-        let turn=if d.phase=="driving" {i.clips.pose(if steering>=0. {a.steer_left.as_ref()} else {a.steer_right.as_ref()},d.time,true)} else {None};
-        let body = v.rendered_motion[&i.id].body;
+        let name = i.clips.variant(name, i.straddled);
+        let pose = i.clips.pose(name.as_ref(), if hopping { 0. } else { d.time }, !hopping);
+        let turn_name = i.clips.variant(if steering>=0. {a.steer_left.as_ref()} else {a.steer_right.as_ref()}, i.straddled);
+        let turn=if d.phase=="driving" {i.clips.pose(turn_name.as_ref(),d.time,true)} else {None};
+        let body = leaned(v.rendered_motion[&i.id].body, i, &car.definition);
         let q = body.rotation;
         let seat = body.translation + q * Vec3::from_array(car.definition.seat);
+        // Hop: the seated pose arcs between the standing spot and the seat.
+        let (seat, q) = if hopping {
+            let (spot, heading) = if d.phase == "entering" {
+                (d.return_position, d.return_heading)
+            } else {
+                exit_spot(&v, i.id, (d.return_position, d.return_heading))
+            };
+            let t = (d.time / HOP).clamp(0., 1.);
+            let s = if d.phase == "entering" { t } else { 1. - t };
+            let e = s * s * (3. - 2. * s);
+            let ground = Vec3::from_array(spot) - Vec3::Y * 0.15;
+            let position = ground.lerp(seat, e) + Vec3::Y * 0.7 * 4. * s * (1. - s);
+            (position, Quat::from_rotation_y(heading).slerp(q, e))
+        } else {
+            (seat, q)
+        };
         v.steering_visual=steering;
         let roots: Vec<_> = world
             .query_filtered::<Entity, With<crate::world::PlayerRoot>>()
@@ -706,7 +909,7 @@ pub(crate) fn present(world: &mut World) {
                 }
             }
             if let Some(mut vis) = world.get_mut::<Visibility>(entity) {
-                *vis = if pose.is_some() {
+                *vis = if pose.is_some() && !replaced {
                     Visibility::Inherited
                 } else {
                     Visibility::Hidden
@@ -722,7 +925,7 @@ pub(crate) fn present(world: &mut World) {
         v.pose = pose;
     });
     world.resource_scope(|world,mut v:Mut<Vehicles>| {
-        let duration=if v.visual_phase=="vanilla" {if v.crash_handoff {0.12} else {0.5}} else {0.4};
+        let duration=match v.visual_phase.as_str() {"vanilla" if v.crash_handoff=>0.12,"vanilla"=>0.25,"driving"=>0.05,_=>0.1};
         if v.blend_time<duration {
             let t=(v.blend_time/duration).clamp(0.,1.);
             crate::animation::blend_vehicle_visual(world,&v.blend_from,t*t*(3.-2.*t));

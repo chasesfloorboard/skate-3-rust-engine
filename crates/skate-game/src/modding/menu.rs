@@ -31,6 +31,8 @@ struct Label(usize);
 struct Badge(usize);
 #[derive(Component)]
 struct Detail;
+#[derive(Component)]
+struct Preview;
 #[derive(Clone)]
 enum Action {
     Select(String),
@@ -89,13 +91,25 @@ pub(super) fn install(app: &mut App) {
                 .after(crate::graphics_menu::MenuInput)
                 .before(crate::map_transition::MapTransitionSet),
         )
-        .add_systems(Update, draw);
+        .add_systems(Update, (debug_open, draw).chain());
+}
+/// Test hook: SKATE_DEBUG_MODMENU="<mod id>|<setting label>" opens that mod's
+/// settings on the row whose label starts with the given text.
+fn debug_open(mut menu: ResMut<ModMenu>, mods: Res<Mods>, time: Res<Time<Real>>, mut done: Local<bool>) {
+    let Ok(spec) = std::env::var("SKATE_DEBUG_MODMENU") else { return };
+    if *done || time.elapsed_secs() < 5. { return; }
+    *done = true;
+    let (id, label) = spec.split_once('|').unwrap_or((&spec, ""));
+    let Some(id) = mods.manager.packages.keys().find(|k| k.contains(id)).cloned() else { return };
+    menu.configure(id);
+    menu.selected = rows(&menu, &mods).iter().position(|(l, _)| l.starts_with(label)).unwrap_or(0);
 }
 fn setup(mut commands: Commands) {
     commands.spawn((Root,GlobalZIndex(20),Node{display:Display::None,width:percent(100),height:percent(100),position_type:PositionType::Absolute,align_items:AlignItems::Center,justify_content:JustifyContent::Center,..default()},BackgroundColor(Color::srgba(0.015,0.025,0.04,0.98)))).with_children(|root| {
         root.spawn((Node{width:px(760),max_width:percent(95),padding:UiRect::all(px(18)),flex_direction:FlexDirection::Column,row_gap:px(5),..default()},BackgroundColor(Color::srgb(0.035,0.055,0.08)))).with_children(|panel| {
             panel.spawn((Text::new("MODS — Lua SDK 1"),TextFont{font_size:28.,..default()},TextColor(Color::WHITE)));
             for i in 0..8 { panel.spawn((Button,Row(i),Node{min_height:px(32),padding:UiRect::all(px(6)),justify_content:JustifyContent::SpaceBetween,..default()},BackgroundColor(Color::srgb(0.08,0.11,0.15)))).with_children(|row| {row.spawn((Label(i),Text::new(""),TextFont{font_size:17.,..default()},TextColor(Color::WHITE)));row.spawn((Badge(i),Text::new(""),TextFont{font_size:16.,..default()},TextColor(Color::WHITE)));}); }
+            panel.spawn((Preview,ImageNode::default(),Node{display:Display::None,width:px(256),height:px(192),align_self:AlignSelf::Center,..default()}));
             panel.spawn((Detail,Text::new(""),TextFont{font_size:15.,..default()},TextColor(Color::srgb(0.65,0.85,0.85))));
             panel.spawn((Text::new("Arrows / D-pad: select & adjust  |  Enter / A: choose  |  Esc / B: back\nStrings: Enter then type; Enter saves, Esc cancels. More rows scroll automatically."),TextFont{font_size:14.,..default()},TextColor(Color::WHITE)));
         });
@@ -265,6 +279,23 @@ fn input(
     };
     menu.status = result.err().unwrap_or_default();
 }
+/// The preview picture (package-relative PNG) for a choice setting's current
+/// value, looked up by its `preview_from` settings' values joined with '|'
+/// (falling back to shorter prefixes of that key).
+pub(super) fn preview_file(p: &skate_mods::Package, key: &String) -> Option<String> {
+    let s = p.manifest.settings.get(key)?;
+    let from = if s.preview_from.is_empty() { std::slice::from_ref(key) } else { &s.preview_from[..] };
+    let values: Vec<_> = from.iter().map(|k| p.settings.get(k).and_then(|v| v.as_str()).unwrap_or("")).collect();
+    // Longest key first: "Pipe Frame|Style 30", then "Pipe Frame".
+    (1..=values.len()).rev().find_map(|n| s.previews.get(&values[..n].join("|")).cloned())
+}
+pub(super) fn load_preview(root: &std::path::Path, file: &str, images: &mut Assets<Image>) -> Option<Handle<Image>> {
+    let bytes = skate_mods::read_bounded(root, file, 4 * 1024 * 1024).ok()?;
+    let image = Image::from_buffer(&bytes, bevy::image::ImageType::Extension("png"),
+        bevy::image::CompressedImageFormats::NONE, true, bevy::image::ImageSampler::linear(),
+        bevy::asset::RenderAssetUsages::RENDER_WORLD).ok()?;
+    Some(images.add(image))
+}
 fn draw(
     menu: Res<ModMenu>,
     mods: Res<Mods>,
@@ -273,6 +304,9 @@ fn draw(
     mut badges: Query<(&Badge, &mut Text, &mut TextColor), Without<Label>>,
     mut buttons: Query<(&Row, &mut Node, &mut BackgroundColor), Without<Root>>,
     mut detail: Single<&mut Text, (With<Detail>, Without<Label>, Without<Badge>)>,
+    mut preview: Single<(&mut ImageNode, &mut Node), (With<Preview>, Without<Root>, Without<Row>)>,
+    mut images: ResMut<Assets<Image>>,
+    mut shown: Local<Option<(String, Option<Handle<Image>>)>>,
 ) {
     root.display = if menu.open {
         Display::Flex
@@ -285,6 +319,22 @@ fn draw(
     let entries = rows(&menu, &mods);
     let selected = menu.selected.min(entries.len() - 1);
     let offset = selected / 8 * 8;
+    // Choice previews: the image for the selected setting's current value.
+    let wanted = match &entries[selected].1 {
+        Action::Setting(id, key) => mods.manager.packages.get(id).and_then(|p| preview_file(p, key).map(|f| (p.root.clone(), f))),
+        _ => None,
+    };
+    let name = wanted.as_ref().map(|(root, file)| format!("{}/{file}", root.display()));
+    if shown.as_ref().map(|(n, _)| Some(n)) != Some(name.as_ref()) {
+        let handle = wanted.and_then(|(root, file)| load_preview(&root, &file, &mut images));
+        if let Some((_, Some(old))) = shown.take() { images.remove(&old); }
+        *shown = name.map(|n| (n, handle));
+    }
+    let (image, node) = &mut *preview;
+    match shown.as_ref().and_then(|(_, h)| h.clone()) {
+        Some(handle) => { image.image = handle; node.display = Display::Flex; }
+        None => node.display = Display::None,
+    }
     for (label, mut text) in &mut labels {
         **text = entries
             .get(offset + label.0)

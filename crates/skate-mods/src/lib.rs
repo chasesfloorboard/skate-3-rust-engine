@@ -10,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
-pub use vm::Command;
+pub use vm::{Command, VehicleParts};
 
 /// Inspect a folder or ZIP and compile its Lua entry without executing callbacks.
 pub fn validate_package(source: &Path) -> Result<Manifest, String> {

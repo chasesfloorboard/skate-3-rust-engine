@@ -20,7 +20,12 @@ struct Asset {
     tree: Octree,
 }
 pub(crate) struct StaticProvider {
+    /// Static primitives first, then `moving` slots (props.rs), each a fixed
+    /// run of edges so indices held across frames stay valid as props move.
     primitives: Vec<Primitive>,
+    static_count: usize,
+    static_rails: usize,
+    moving: Vec<Bounds>,
     metadata: Vec<spline::PrimitiveMetadata>,
     rail_guids: Vec<[u64; 2]>,
     assets: Vec<Asset>,
@@ -30,15 +35,18 @@ pub(crate) struct StaticProvider {
     source_rail_indices: Vec<u64>,
 }
 
+/// Edges per moving slot: the four sides of a prop's top face.
+pub(crate) const MOVING_EDGES: usize = 4;
+
 impl StaticProvider {
     /// WMET preserves source section identities even when spline IDs repeat.
     /// Missing provenance is an explicit conversion prerequisite, not a ray miss.
     pub fn new(map: Option<&SkateMap>) -> Result<Self, String> {
         let Some(map) = map else {
-            return Ok(Self { primitives: vec![], metadata: vec![], rail_guids: vec![], assets: vec![], authored_bounds: vec![], source_for_primitive: vec![], source_rail_indices: vec![] });
+            return Ok(Self { primitives: vec![], static_count: 0, static_rails: 0, moving: vec![], metadata: vec![], rail_guids: vec![], assets: vec![], authored_bounds: vec![], source_for_primitive: vec![], source_rail_indices: vec![] });
         };
         if map.rails.is_empty() {
-            return Ok(Self { primitives: vec![], metadata: vec![], rail_guids: vec![], assets: vec![], authored_bounds: vec![], source_for_primitive: vec![], source_rail_indices: vec![] });
+            return Ok(Self { primitives: vec![], static_count: 0, static_rails: 0, moving: vec![], metadata: vec![], rail_guids: vec![], assets: vec![], authored_bounds: vec![], source_for_primitive: vec![], source_rail_indices: vec![] });
         }
         if map.rails.iter().all(|rail| rail.native.is_none()) { return Self::authored(&map.rails); }
         let mut metadata = map.extensions.iter().filter(|e| e.tag == *b"WMET");
@@ -107,14 +115,14 @@ impl StaticProvider {
             let tree = Octree::new(bounds, indices.iter().map(|&i| spatial_bounds[i]).collect())?;
             Ok(Asset { source, bounds, indices, tree })
         }).collect::<Result<_, String>>()?;
-        Ok(Self { primitives, metadata, rail_guids, assets, authored_bounds, source_for_primitive, source_rail_indices })
+        Ok(Self { static_count: primitives.len(), static_rails: rail_guids.len(), moving: vec![], primitives, metadata, rail_guids, assets, authored_bounds, source_for_primitive, source_rail_indices })
     }
 
     /// Explicit host-authored polylines have no retail source section identity.
     pub fn authored(rails: &[skate_data::skate_map::Rail]) -> Result<Self, String> {
         let bytes = spline::build_rails(rails)?;
         let (primitives, metadata) = spline::decoded_from_blob(&bytes)?;
-        let rail_guids = (0..rails.len()).map(|i| {
+        let rail_guids: Vec<[u64; 2]> = (0..rails.len()).map(|i| {
             let at = 16 + i * 32;
             [u64::from_be_bytes(bytes[at..at+8].try_into().unwrap()),
              u64::from_be_bytes(bytes[at+8..at+16].try_into().unwrap())]
@@ -132,7 +140,8 @@ impl StaticProvider {
             }]
         } else { vec![] };
         let source_rail_indices = primitives.iter().map(|p| p.owner - 1).collect();
-        Ok(Self { source_for_primitive: vec![0; primitives.len()], primitives, metadata,
+        Ok(Self { source_for_primitive: vec![0; primitives.len()], static_count: primitives.len(),
+            static_rails: rail_guids.len(), moving: vec![], primitives, metadata,
             rail_guids, assets, authored_bounds, source_rail_indices })
     }
 
@@ -153,7 +162,47 @@ impl StaticProvider {
     }
 
     pub fn source(&self, primitive: usize) -> Option<&SourceIdentity> {
+        if primitive >= self.static_count { return None; }
         self.source_for_primitive.get(primitive).map(|&asset| &self.assets[asset].source)
+    }
+
+    /// Replace the moving edges (props.rs): `edges[slot]` is that slot's run of
+    /// MOVING_EDGES segments, or None while it cannot be ground (inactive
+    /// slots keep their index but match no query). Slots only ever grow.
+    pub fn set_moving(&mut self, edges: &[Option<[[[f32; 3]; 2]; MOVING_EDGES]>]) {
+        let far = [0., -1.0e6, 0., 1.];
+        for slot in self.moving.len() / MOVING_EDGES..edges.len() {
+            let owner = (self.static_rails + slot) as u64 + 1;
+            // Synthetic spline identity: "PROP" plus the slot.
+            self.rail_guids.push([0x5052_4f50_0000_0000 | slot as u64, 0]);
+            for segment in 0..MOVING_EDGES {
+                self.primitives.push(Primitive { start: far, end: far, owner });
+                self.metadata.push(spline::PrimitiveMetadata { spline_guids: [0x5052_4f50_0000_0000 | slot as u64, 0], segment_index: segment as u32, flags: 0 });
+                self.authored_bounds.push(Bounds { min: [1.; 3], max: [-1.; 3] });
+                self.source_for_primitive.push(0);
+                self.source_rail_indices.push(slot as u64);
+                self.moving.push(Bounds { min: [1.; 3], max: [-1.; 3] });
+            }
+        }
+        let slots = self.moving.len() / MOVING_EDGES;
+        for (slot, run) in edges.iter().map(Some).chain(std::iter::repeat(None)).take(slots).enumerate() {
+            let run = run.and_then(|r| r.as_ref());
+            for segment in 0..MOVING_EDGES {
+                let at = slot * MOVING_EDGES + segment;
+                let (start, end, bounds) = match run {
+                    Some(run) => {
+                        let [a, b] = run[segment];
+                        (a, b, Bounds { min: std::array::from_fn(|i| a[i].min(b[i])), max: std::array::from_fn(|i| a[i].max(b[i])) })
+                    }
+                    None => ([0., -1.0e6, 0.], [0., -1.0e6, 0.], Bounds { min: [1.; 3], max: [-1.; 3] }),
+                };
+                let primitive = &mut self.primitives[self.static_count + at];
+                primitive.start = [start[0], start[1], start[2], 1.];
+                primitive.end = [end[0], end[1], end[2], 1.];
+                self.authored_bounds[self.static_count + at] = bounds;
+                self.moving[at] = bounds;
+            }
+        }
     }
 
     pub fn bounds(&self, primitive: usize) -> Option<([f32; 3], [f32; 3])> {
@@ -172,6 +221,11 @@ impl StaticProvider {
         let square = (delta[0]*delta[0]+delta[1]*delta[1])+delta[2]*delta[2];
         if !(square > f32::from_bits(0x3780_0000)) { return Ok(vec![]); }
         let mut result = Vec::new();
+        // Moving prop edges first: few, and the ones a skater is aiming at.
+        for (i, bounds) in self.moving.iter().enumerate() {
+            if result.len() == 40 { return Ok(result); }
+            if bounds.overlaps(query) { result.push(self.static_count + i); }
+        }
         for asset in &self.assets {
             if !asset.bounds.overlaps(query) { continue; }
             for local in asset.tree.query(query, 40-result.len()) { result.push(asset.indices[local]); }

@@ -15,7 +15,9 @@ pub(super) const BUFFER: Handle<ShaderStorageBuffer> =
     bevy::asset::uuid_handle!("cd736f89-4882-4a5d-8fcb-32273beeaaf4");
 
 #[derive(Resource, Clone, Default, ExtractResource)]
-pub(crate) struct ShadowState(pub Vec4, pub Vec4, pub [Vec4; 7]);
+/// (shadow floor, clock: x time / y ocean / z night / w dusk, ocean PCA,
+/// sun direction: w=1 when set, skater probe lighting SH for dynamic props)
+pub(crate) struct ShadowState(pub Vec4, pub Vec4, pub [Vec4; 7], pub Vec4, pub [Vec4; 9]);
 
 impl ShadowState {
     pub(crate) fn approach(&mut self, target: Vec3, dt: f32) {
@@ -44,7 +46,7 @@ pub(super) fn install(app: &mut App) {
 }
 
 fn initialize(mut buffers: ResMut<Assets<ShaderStorageBuffer>>) {
-    let mut buffer = ShaderStorageBuffer::from([Vec4::ZERO; 9]);
+    let mut buffer = ShaderStorageBuffer::from([Vec4::ZERO; 19]);
     buffer.buffer_description.usage |= BufferUsages::COPY_DST;
     buffers
         .insert(BUFFER.id(), buffer)
@@ -60,13 +62,15 @@ fn upload(
         let values = [state.0, state.1]
             .into_iter()
             .chain(state.2)
+            .chain([state.3])
+            .chain(state.4)
             .flat_map(|v| v.to_array())
             .flat_map(f32::to_le_bytes);
-        let mut bytes = [0u8; 144];
+        let mut bytes = [0u8; 304];
         for (destination, value) in bytes.iter_mut().zip(values) {
             *destination = value;
         }
-        // Keep the buffer and all material bind groups alive; upload 144 frame bytes.
+        // Keep the buffer and all material bind groups alive; upload 304 frame bytes.
         queue.write_buffer(&buffer.buffer, 0, &bytes);
     }
 }
@@ -106,13 +110,43 @@ fn read_pca(root: &std::path::Path) -> Option<OceanPca> {
         && pca.frames.iter().flatten().flatten().all(|v| v.is_finite()))
     .then_some(pca)
 }
-pub(super) fn pca_available(root: &std::path::Path) -> bool {
-    read_pca(root).is_some()
+/// Water always has an animation table: the authored one when setup could
+/// extract it, otherwise the synthetic stand-in below.
+pub(super) fn pca_available(_root: &std::path::Path) -> bool {
+    true
+}
+/// Stand-in for the TU3 PCA table (only extractable from one specific mapped
+/// executable, which normal setup does not have). One looping second of
+/// ripples: the mean normal points straight up and the two normal maps'
+/// X/Y channels are mixed in with rotating weights, so still water, ponds
+/// and the ocean shimmer instead of falling back to an untextured surface.
+fn synthetic_pca() -> OceanPca {
+    let frames = (0..30).map(|k| {
+        let phase = k as f32 / 30.0 * std::f32::consts::TAU;
+        let (s, c) = phase.sin_cos();
+        let (s2, c2) = (phase * 2.0 + 1.3).sin_cos();
+        let a = 0.16;
+        // Rows: mean (X, Z, Y as the shader expects), then weight pairs for
+        // the X, Y and Z outputs (first normal map, second normal map).
+        [
+            [0.5, 0.5, 1.0, 0.0],
+            [a * c, a * s, 0.0, 0.0],
+            [a * 0.6 * c2, -a * 0.6 * s2, 0.0, 0.0],
+            [-a * s, a * c, 0.0, 0.0],
+            [a * 0.6 * s2, a * 0.6 * c2, 0.0, 0.0],
+            [0.0, 0.0, 0.02, 0.0],
+            [0.0, 0.0, 0.02, 0.0],
+        ]
+    }).collect();
+    OceanPca { hz: 30.0, frames }
 }
 fn load_pca(mut commands: Commands, config: Res<crate::config::Config>) {
     if let Some(pca) = read_pca(&config.asset_root) {
         info!("RETAIL_OCEAN: loaded 30 authored PCA frames");
         commands.insert_resource(pca);
+    } else {
+        info!("RETAIL_OCEAN: authored PCA table unavailable; using synthetic ripples");
+        commands.insert_resource(synthetic_pca());
     }
 }
 fn clock(mut state: ResMut<ShadowState>, time: Res<Time>, pca: Option<Res<OceanPca>>) {
