@@ -43,6 +43,18 @@ fn verify(
         return;
     };
     state.elapsed += time.delta_secs();
+    // SKATE_VERIFY_TIMES="t1,t2,..": extra screenshots at those seconds, saved
+    // beside the main capture as <name>-<t>.png (animation and trick checks).
+    if animation.ready {
+        if let Ok(times) = std::env::var("SKATE_VERIFY_TIMES") {
+            for t in times.split(',').filter_map(|t| t.trim().parse::<f32>().ok()) {
+                if state.elapsed > t && state.elapsed - time.delta_secs() <= t {
+                    let extra = path.with_file_name(format!("{}-{t}.png", path.file_stem().and_then(|s| s.to_str()).unwrap_or("verify")));
+                    commands.spawn(Screenshot::primary_window()).observe(save_to_disk(extra));
+                }
+            }
+        }
+    }
     // Opt-in visual smoke check of the replay HUD and presentation endpoints.
     if animation.ready && state.elapsed > 2.0 && !replay.active
         && std::env::var("SKATE_VERIFY_REPLAY").as_deref() == Ok("1") {

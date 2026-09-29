@@ -20,6 +20,9 @@ pub(crate) struct AnimationStatus {
     /// (upper leg, knee, foot) for left and right: kept-proportion legs
     /// reach for the stock feet with two-bone IK.
     legs: Option<[[usize; 3]; 2]>,
+    /// 0..1: how closed a kept-proportion character's hands are. They ball
+    /// into fists while the skater grabs (their rigs have no finger bones).
+    fist: f32,
 }
 /// Kept-proportion character (custom_models manifest "proportions").
 #[derive(Clone, Copy)]
@@ -85,6 +88,10 @@ impl AnimationStatus {
                 if !seated {
                     if let Some(rotation) = self.leg_ik(b.bone, &|i| global(i)) {
                         t.rotation = rotation;
+                    }
+                    // Grabs: the hand (fingers along its local X) closes up.
+                    if self.fist > 0.01 && self.hands.is_some_and(|h| h.iter().any(|&(hand, _)| hand == b.bone)) {
+                        t.scale = Vec3::ONE.lerp(Vec3::new(0.55, 0.9, 1.0), self.fist);
                     }
                 }
             }
@@ -257,7 +264,7 @@ impl AnimationStatus {
             }
         }
         if bindings.is_empty() { return Err("Imported scene has no skinned character".into()); }
-        Ok(Self { ready: true, bindings, keep: None, feet: feet(names), hands: hands(names), legs: legs(names),
+        Ok(Self { ready: true, bindings, keep: None, feet: feet(names), hands: hands(names), legs: legs(names), fist: 0.0,
             board: names.iter().position(|n| n.eq_ignore_ascii_case("SKATEBOARD_ROOT")) })
     }
 }
@@ -403,12 +410,19 @@ fn present(
     skater: Res<SkaterRuntime>,
     replay: Res<crate::replay::Replay>,
     time: Res<Time<Fixed>>,
-    animation: Res<AnimationStatus>,
+    real: Res<Time<Real>>,
+    mut animation: ResMut<AnimationStatus>,
     mut nodes: Query<&mut Transform>,
 ) {
     if !animation.ready {
         return;
     }
+    // Grabbing (the animation's "Grabbing" flag): custom hands ball up.
+    let grabbing = skater.animation_input.fields.flags2468 & (1 << 5) != 0;
+    let target = if grabbing && animation.keep.is_some() { 1.0 } else { 0.0 };
+    let fist = animation.fist;
+    animation.fist = fist + (target - fist) * (real.delta_secs() * 14.0).min(1.0);
+    let animation = &*animation;
     // Existing GLB was exported through Blender: its bone-local axes are
     // rotated -90 degrees about X relative to the native frames. Both files'
     // world positions are Y-up. This is a skin basis change, not a physics turn.

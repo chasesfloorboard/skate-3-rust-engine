@@ -55,11 +55,44 @@ fn cursor_follows_device(
     }
 }
 
-pub(crate) fn poll_controllers(mut input: ResMut<ControllerInput>,config:Res<crate::config::Config>,net:Option<Res<crate::multiplayer::Multiplayer>>,windows:Query<&Window>,mut capabilities:Local<[platform::CapabilityCache;4]>) {
+fn copy(s: &skate_core::input::xbox::XboxState) -> skate_core::input::xbox::XboxState {
+    skate_core::input::xbox::XboxState { buttons: s.buttons, triggers: s.triggers, left: s.left, right: s.right }
+}
+
+/// Test hook: SKATE_DEBUG_INPUT=script plays pad 0 from a file of lines
+/// `seconds lx ly rx ry lt rt buttons` (sticks -1..1, triggers 0..1, buttons
+/// XInput bits in hex), each held until the next line's time.
+fn scripted_pad(seconds: f32, packet: &mut u32, last: &mut Option<usize>) -> Option<platform::DevicePacket> {
+    static SCRIPT: std::sync::OnceLock<Option<Vec<(f32, skate_core::input::xbox::XboxState)>>> = std::sync::OnceLock::new();
+    let script = SCRIPT.get_or_init(|| {
+        let text = std::fs::read_to_string(std::env::var_os("SKATE_DEBUG_INPUT")?).ok()?;
+        let stick = |v: f32| (v.clamp(-1.0, 1.0) * 32767.0) as i16;
+        let trigger = |v: f32| (v.clamp(0.0, 1.0) * 255.0) as u8;
+        Some(text.lines().filter_map(|line| {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            if f.len() < 8 || f[0].starts_with('#') { return None; }
+            let n = |i: usize| f[i].parse::<f32>().ok();
+            Some((n(0)?, skate_core::input::xbox::XboxState {
+                left: [stick(n(1)?), stick(n(2)?)], right: [stick(n(3)?), stick(n(4)?)],
+                triggers: [trigger(n(5)?), trigger(n(6)?)],
+                buttons: u16::from_str_radix(f[7].trim_start_matches("0x"), 16).ok()?,
+            }))
+        }).collect())
+    }).as_ref()?;
+    let index = script.iter().rposition(|(at, _)| *at <= seconds)?;
+    if *last != Some(index) { *last = Some(index); *packet += 1; }
+    Some(platform::DevicePacket { number: *packet, state: copy(&script[index].1), subtype: 1 })
+}
+
+pub(crate) fn poll_controllers(mut input: ResMut<ControllerInput>,config:Res<crate::config::Config>,net:Option<Res<crate::multiplayer::Multiplayer>>,windows:Query<&Window>,mut capabilities:Local<[platform::CapabilityCache;4]>,
+    time: Res<Time<Real>>, mut script: Local<(u32, Option<usize>)>) {
     let previous = input.status;
     let focused=windows.iter().any(|w|w.focused);
     let active=net.is_some_and(|n|n.active());
+    let (packet, last) = &mut *script;
+    let scripted = scripted_pad(time.elapsed_secs(), packet, last);
     input.collect(std::array::from_fn(|slot| {
+        if slot == 0 && let Some(pad) = &scripted { return Ok(platform::DevicePacket { number: pad.number, state: copy(&pad.state), subtype: pad.subtype }); }
         if active && ((!focused && config.multiplayer.controller.is_none()) || config.multiplayer.controller.is_some_and(|selected|selected as usize!=slot)) {
             capabilities[slot].invalidate();
             Err(platform::DeviceError::Disconnected)
