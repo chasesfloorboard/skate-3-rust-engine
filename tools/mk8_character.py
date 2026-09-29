@@ -82,8 +82,95 @@ def soles(path):
 # Joints that spin freely (as rings) rather than swing, per racer.
 SPIN = {'Wendy': ('seleeve',)}
 
-# Hair under the cap for capped racers other than Mario (bald, with a comb-over).
-HAIR = {'Luigi': '3a2010', 'Wario': '2e1a0e', 'Waluigi': '241a26'}
+
+def centre_rings(path):
+    """Put each ring joint (JIGGLE_SPIN_) at its ring's centre, with its Y
+    axis along the arm through it, so jiggle.rs can hang the ring on the arm
+    and spin it about its own centre. The rips hang the ring off-centre by
+    more than it clears the arm; the ring moves in so it can hang any way
+    without cutting the arm."""
+    import pygltflib
+    g = pygltflib.GLTF2().load(str(path))
+    blob = bytearray(g.binary_blob())
+
+    def acc(i):
+        a = g.accessors[i]
+        v = g.bufferViews[a.bufferView]
+        n = {'SCALAR': 1, 'VEC2': 2, 'VEC3': 3, 'VEC4': 4, 'MAT4': 16}[a.type]
+        dt = {5126: np.float32, 5123: np.uint16, 5125: np.uint32, 5121: np.uint8}[a.componentType]
+        start = (v.byteOffset or 0) + (a.byteOffset or 0)
+        return np.frombuffer(bytes(blob), dt, a.count * n, start).reshape(a.count, n).copy(), start
+
+    skin = g.skins[0]
+    names = [g.nodes[j].name for j in skin.joints]
+    binds, binds_at = acc(skin.inverseBindMatrices)
+    world = [np.linalg.inv(b.reshape(4, 4).T) for b in binds]
+    parent = {c: i for i, n in enumerate(g.nodes) for c in (n.children or [])}
+    joint_of = {node: i for i, node in enumerate(skin.joints)}
+    prims = [p for n in g.nodes if n.mesh is not None for p in g.meshes[n.mesh].primitives]
+    for ring, name in enumerate(names):
+        if not name.startswith('JIGGLE_SPIN_'):
+            continue
+        hand = joint_of[parent[skin.joints[ring]]]
+        arm = joint_of.get(parent.get(skin.joints[hand]))
+        if arm is None:
+            continue
+        origin = world[hand][:3, 3]
+        axis = origin - world[arm][:3, 3]
+        axis /= np.linalg.norm(axis)
+        ring_points, arm_points = [], []
+        for p in prims:
+            pos, _ = acc(p.attributes.POSITION)
+            jj, _ = acc(p.attributes.JOINTS_0)
+            ww, _ = acc(p.attributes.WEIGHTS_0)
+            share = lambda js: (ww * np.isin(jj, js)).sum(1)
+            ring_points.append(pos[share([ring]) > 0.5])
+            arm_points.append(pos[share([hand, arm]) > 0.5])
+        points = np.concatenate(ring_points)
+        if len(points) < 8:
+            continue
+        centre = points.mean(0)
+        along = (points - centre) @ axis
+        inner = np.linalg.norm(points - centre - np.outer(along, axis), axis=1).min()
+        t = (centre - origin) @ axis
+        hang = centre - origin - t * axis
+        # The arm's widest point within the ring's width.
+        limbs = np.concatenate(arm_points)
+        lt = (limbs - origin) @ axis
+        slab = limbs[np.abs(lt - t) < np.ptp(along) / 2 + 0.01]
+        widest = np.linalg.norm(slab - origin - np.outer((slab - origin) @ axis, axis), axis=1).max() if len(slab) else 0.0
+        room = max(inner - widest - 0.004, 0.0)
+        length = np.linalg.norm(hang)
+        new_centre = origin + t * axis + (hang / length * min(length, room) if length > 1e-6 else 0)
+        shift = new_centre - centre
+        for p in prims:
+            pos, at = acc(p.attributes.POSITION)
+            jj, _ = acc(p.attributes.JOINTS_0)
+            ww, _ = acc(p.attributes.WEIGHTS_0)
+            mine = (ww * (jj == ring)).sum(1) > 0.5
+            if mine.any():
+                pos[mine] += shift
+                blob[at:at + pos.nbytes] = pos.astype(np.float32).tobytes()
+                a = g.accessors[p.attributes.POSITION]
+                a.min, a.max = pos.min(0).tolist(), pos.max(0).tolist()
+        # Joint frame: Y along the arm, X toward the hang, at the centre.
+        x = hang - (hang @ axis) * axis
+        x = x / np.linalg.norm(x) if np.linalg.norm(x) > 1e-6 else np.cross(axis, [0, 0, 1])
+        frame = np.eye(4)
+        frame[:3, 0], frame[:3, 1], frame[:3, 2] = x, axis, np.cross(x, axis)
+        frame[:3, 3] = new_centre
+        world[ring] = frame
+        binds[ring] = np.linalg.inv(frame).T.reshape(-1)
+        local = np.linalg.inv(world[hand]) @ frame
+        g.nodes[skin.joints[ring]].matrix = local.T.reshape(-1).tolist()
+        print(f'{name}: centred, hangs {min(length, room) * 100:.1f} cm (ring inner {inner * 100:.1f} cm, arm {widest * 100:.1f} cm)')
+    blob[binds_at:binds_at + binds.nbytes] = binds.astype(np.float32).tobytes()
+    g.set_binary_blob(bytes(blob))
+    g.save_binary(str(path))
+
+# Hair under the cap for capped racers (a racer without an entry gets a bald
+# crown with a comb-over).
+HAIR = {'Mario': '4a2812', 'Metal Mario': '4a2812', 'Luigi': '3a2010', 'Wario': '2e1a0e', 'Waluigi': '241a26'}
 
 
 def default_library():
@@ -150,6 +237,8 @@ def main():
         import mk8_convert
         mk8_convert.SPIN = set(SPIN.get(args.name, ()))
         report = convert_glb(mixamo, reference, staging / 'character.glb', include_board=False, keep_height=args.height)
+        if mk8_convert.SPIN:
+            centre_rings(staging / 'character.glb')
         sole, _, foot_y = soles(staging / 'character.glb')
         if sole is not None:
             report['ankle'] = float(foot_y - sole)

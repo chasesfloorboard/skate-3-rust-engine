@@ -32,8 +32,8 @@ struct Jiggle {
     gravity: f32,
     limit: f32,
     cap: bool,
-    /// Rings (JIGGLE_SPIN_): turn about their bone, driven by its motion.
-    spin: Option<(Vec3, f32, f32)>,
+    /// Rings (JIGGLE_SPIN_): hang loose around the arm and spin about it.
+    spin: Option<Ring>,
     /// Tip position and velocity in the world.
     position: Vec3,
     velocity: Vec3,
@@ -45,10 +45,74 @@ struct Jiggle {
     floor: f32,
 }
 
+/// A ring around an arm (Wendy's wrist hoops). The converter puts the joint
+/// at the ring's centre with its Y axis along the arm (tools/mk8_character.py
+/// centre_rings), and moves the ring in until it clears the arm whichever way
+/// it hangs. Here it hangs toward gravity (less the arm's acceleration), rolls
+/// round the arm as that direction turns, and spins about its own centre, so it
+/// never passes through the arm.
+struct Ring {
+    /// Arm axis and the ring's distance along it, in the parent (hand) space.
+    axis: Vec3,
+    along: f32,
+    /// How far the centre hangs off the axis, and the direction it hangs.
+    hang: f32,
+    dir: Vec3,
+    angle: f32,
+    rate: f32,
+    /// The arm point's last world position and velocity.
+    last: Option<(Vec3, Vec3)>,
+}
+
+impl Ring {
+    fn new(rest: &Transform) -> Self {
+        let axis = (rest.rotation * Vec3::Y).normalize_or(Vec3::Y);
+        let along = rest.translation.dot(axis);
+        let off = rest.translation - axis * along;
+        Ring { axis, along, hang: off.length(), dir: off.try_normalize().unwrap_or_else(|| axis.any_orthonormal_vector()),
+               angle: 0.0, rate: 0.0, last: None }
+    }
+
+    /// The ring's local transform this frame under a parent turned by `parent`
+    /// whose origin is at `origin`.
+    fn step(&mut self, rest: &Transform, parent: Quat, origin: Vec3, dt: f32) -> Transform {
+        let (velocity, accel) = match self.last {
+            Some((last, last_velocity)) => {
+                let velocity = (origin - last) / dt;
+                (velocity, ((velocity - last_velocity) / dt).clamp_length_max(80.0))
+            }
+            None => (Vec3::ZERO, Vec3::ZERO),
+        };
+        // A jump (teleport, respawn) starts the ring afresh.
+        self.last = Some((origin, if velocity.length() > 40.0 { Vec3::ZERO } else { velocity }));
+        let axis_world = parent * self.axis;
+        let pull = Vec3::NEG_Y * 9.8 - accel;
+        let across = pull - axis_world * pull.dot(axis_world);
+        let before = self.dir;
+        if across.length() > 1.0 {
+            let want = parent.inverse() * across.normalize();
+            let blend = self.dir.lerp(want, (12.0 * dt).min(1.0));
+            self.dir = (blend - self.axis * blend.dot(self.axis)).try_normalize().unwrap_or(self.dir);
+        }
+        // Rolling round the arm turns the ring the other way; arm movement
+        // flicks it into a spin that friction slows again.
+        let rolled = before.cross(self.dir).dot(self.axis).clamp(-1.0, 1.0).asin();
+        self.rate += velocity.length().min(10.0) * 2.5 * dt;
+        self.rate *= (1.0 - 1.2 * dt).max(0.0);
+        self.rate = self.rate.clamp(0.3, 20.0);
+        self.angle = (self.angle + self.rate * dt - rolled * 0.6) % std::f32::consts::TAU;
+        Transform {
+            translation: self.axis * self.along + self.dir * self.hang,
+            rotation: (Quat::from_axis_angle(self.axis, self.angle) * rest.rotation).normalize(),
+            scale: rest.scale,
+        }
+    }
+}
+
 fn tuning(name: &str) -> (f32, f32, f32, f32) {
     let name = name.to_ascii_lowercase();
     // (stiffness, damping ratio, gravity share, max swing radians)
-    if name.contains("cap") { (220.0, 0.45, 0.15, 0.5) } // loose enough to wobble while riding
+    if name.contains("cap") { (330.0, 0.55, 0.1, 0.2) } // a small wobble while riding; more tips it into the head and bares the hair pulled in under it (cap_fit.py)
     else if name.contains("mustache") { (260.0, 0.35, 0.2, 0.5) }
     else if name.contains("tail") { (70.0, 0.25, 0.3, 1.0) }
     else if name.contains("skirt") { (160.0, 0.45, 0.3, 0.6) }
@@ -78,8 +142,7 @@ fn adopt(
         commands.entity(entity).insert(Jiggle {
             rest: *transform, tip, depth, stiffness, damping, gravity, limit,
             cap: name.as_str().to_ascii_lowercase().contains("cap"),
-            // Spin axis: along the bone the ring sits on (its offset from it).
-            spin: name.as_str().starts_with("JIGGLE_SPIN_").then(|| (transform.translation.try_normalize().unwrap_or(Vec3::Y), 0.0, 0.0)),
+            spin: name.as_str().starts_with("JIGGLE_SPIN_").then(|| Ring::new(transform)),
             position: Vec3::ZERO, velocity: Vec3::ZERO, ready: false,
             lift: 0.0, loose: None, floor: 0.0,
         });
@@ -123,6 +186,14 @@ fn simulate(
         let rest_world = parent_affine * j.rest.compute_affine();
         let origin: Vec3 = rest_world.translation.into();
         let target = rest_world.transform_point3(j.tip);
+        if let Some(mut ring) = j.spin.take() {
+            let local = ring.step(&j.rest, parent_global.rotation(), parent_global.translation(), dt);
+            j.spin = Some(ring);
+            *transform = local;
+            *global = parent_global.mul_transform(local);
+            updated.insert(entity, *global);
+            continue;
+        }
 
         if j.cap {
             // Off in a bail: a loose cap falls, bounces and rests on the floor
@@ -190,15 +261,6 @@ fn simulate(
         let world_rotation = swing * Quat::from_affine3(&rest_world);
         let mut local = j.rest;
         local.rotation = (parent_global.rotation().inverse() * world_rotation).normalize();
-        let flick = j.velocity.length();
-        if let Some((axis, angle, rate)) = j.spin.as_mut() {
-            // The arm's swing flicks the ring round; friction slows it again.
-            *rate += flick * 6.0 * dt;
-            *rate *= (1.0 - 1.5 * dt).max(0.0);
-            *rate = rate.clamp(0.4, 25.0);
-            *angle = (*angle + *rate * dt) % std::f32::consts::TAU;
-            local.rotation = (Quat::from_axis_angle(*axis, *angle) * local.rotation).normalize();
-        }
         if j.cap {
             local.translation += parent_global.rotation().inverse() * Vec3::Y * j.lift / parent_global.scale().y.max(1e-3);
         }
@@ -208,16 +270,17 @@ fn simulate(
     }
 }
 
-/// Hair the cap covers (material "…_UnderCap", tools/smd_to_mixamo.py) shows
-/// only while a cap is off: otherwise it pokes through the cap.
+/// Hair the cap covers comes twice (tools/cap_fit.py): "…_InCap", pulled in
+/// to fit inside the cap, while it sits on the head, and "…_UnderCap", the
+/// hair as modelled, once it lifts on a fall or comes off in a bail. Neither
+/// pokes through the cap, and the head is never bare under it.
 fn under_cap(
     caps: Query<&Jiggle>,
     mut hair: Query<(&bevy::gltf::GltfMaterialName, &mut Visibility)>,
 ) {
-    let off = caps.iter().any(|j| j.cap && j.loose.is_some());
+    let off = caps.iter().any(|j| j.cap && (j.loose.is_some() || j.lift > 0.03));
     for (name, mut visibility) in &mut hair {
-        if name.0.contains("UnderCap") {
-            visibility.set_if_neq(if off { Visibility::Inherited } else { Visibility::Hidden });
-        }
+        let show = if name.0.contains("UnderCap") { off } else if name.0.contains("InCap") { !off } else { continue };
+        visibility.set_if_neq(if show { Visibility::Inherited } else { Visibility::Hidden });
     }
 }

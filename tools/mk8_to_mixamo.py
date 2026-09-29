@@ -44,15 +44,19 @@ def scalp(gltf, cap, body, accessor, view, head, hair=None):
     """A bald crown with a comb-over under a racer's cap: the rips model no
     head under the cap, so the head was open when the cap came off. An
     ellipsoid dome over the head mesh's open top (its highest ring under the
-    cap), reaching up inside the crown, skinned to the head."""
+    cap), reaching up inside the crown, skinned to the head. It comes twice:
+    "Scalp_InCap" pulled in to fit inside the cap (tools/cap_fit.py), shown
+    while the cap is on, and "Scalp_UnderCap" as built, shown once the cap
+    lifts or comes off (jiggle.rs)."""
     import io
     from PIL import Image, ImageDraw
     top = cap[:, 1].max()
     low, high = cap.min(0), cap.max(0)
     under = body[(body[:, 0] > low[0]) & (body[:, 0] < high[0]) & (body[:, 2] > low[2]) & (body[:, 2] < high[2])]
     rim_y = under[:, 1].max()
-    # Width from the cap's crown above that opening (not its brim).
-    crown = cap[cap[:, 1] > rim_y]
+    # Width from the cap's crown above that opening, clear of the brim, which
+    # sits about level with it and made the dome bulge out over the brim.
+    crown = cap[cap[:, 1] > rim_y + 0.04]
     if len(crown) < 10:
         crown = under[under[:, 1] > rim_y - 0.04]
     centre = (crown.min(0) + crown.max(0)) / 2
@@ -102,7 +106,7 @@ def scalp(gltf, cap, body, accessor, view, head, hair=None):
     image.save(data, 'PNG')
     gltf.images.append(gl.Image(bufferView=view(data.getvalue()), mimeType='image/png'))
     gltf.textures.append(gl.Texture(source=len(gltf.images) - 1))
-    material = gl.Material(name='Scalp', doubleSided=True, pbrMetallicRoughness=gl.PbrMetallicRoughness(
+    material = gl.Material(name='Scalp_UnderCap', doubleSided=True, pbrMetallicRoughness=gl.PbrMetallicRoughness(
         metallicFactor=0.0, roughnessFactor=0.7, baseColorTexture=gl.TextureInfo(index=len(gltf.textures) - 1)))
     # Metal racers (Metal Mario): the scalp is metal too, reflecting the
     # body's sphere map over a dark base like the body's own albedo.
@@ -118,18 +122,25 @@ def scalp(gltf, cap, body, accessor, view, head, hair=None):
         material.emissiveTexture = gl.TextureInfo(index=metal.emissiveTexture.index)
         material.emissiveFactor = [0.0, 0.0, 0.0]
     gltf.materials.append(material)
+    import copy
+    gltf.materials.append(copy.deepcopy(material))
+    gltf.materials[-1].name = 'Scalp_InCap'
+    from cap_fit import squash
+    fitted, _ = squash(positions, cap, np.array([centre[0], base, centre[2]]), 0.004)
     count = len(positions)
     joints = np.zeros((count, 4), np.uint16)
     joints[:, 0] = head
     weights = np.zeros((count, 4), np.float32)
     weights[:, 0] = 1.0
-    attributes = gl.Attributes(POSITION=accessor(positions, gl.VEC3, bounds=True), NORMAL=accessor(normals, gl.VEC3),
-                               TEXCOORD_0=accessor(uvs, gl.VEC2),
-                               JOINTS_0=accessor(joints, gl.VEC4, component=gl.UNSIGNED_SHORT),
-                               WEIGHTS_0=accessor(weights, gl.VEC4))
-    gltf.meshes.append(gl.Mesh(name='Scalp', primitives=[gl.Primitive(attributes=attributes, material=len(gltf.materials) - 1)]))
-    gltf.nodes.append(gl.Node(name='Scalp', mesh=len(gltf.meshes) - 1, skin=0))
-    gltf.scenes[0].nodes.append(len(gltf.nodes) - 1)
+    for name, points, index in (('Scalp_UnderCap', positions, len(gltf.materials) - 2),
+                                ('Scalp_InCap', fitted.astype(np.float32), len(gltf.materials) - 1)):
+        attributes = gl.Attributes(POSITION=accessor(points, gl.VEC3, bounds=True), NORMAL=accessor(normals, gl.VEC3),
+                                   TEXCOORD_0=accessor(uvs, gl.VEC2),
+                                   JOINTS_0=accessor(joints, gl.VEC4, component=gl.UNSIGNED_SHORT),
+                                   WEIGHTS_0=accessor(weights, gl.VEC4))
+        gltf.meshes.append(gl.Mesh(name=name, primitives=[gl.Primitive(attributes=attributes, material=index)]))
+        gltf.nodes.append(gl.Node(name=name, mesh=len(gltf.meshes) - 1, skin=0))
+        gltf.scenes[0].nodes.append(len(gltf.nodes) - 1)
 
 
 def axis_fix(primitives, bind_shape, dominant, joint_position):

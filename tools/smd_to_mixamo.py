@@ -21,6 +21,9 @@ from pathlib import Path
 import numpy as np
 import pygltflib as gl
 
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 MIXAMO = {
     'Hip': 'Hips', 'Spine1': 'Spine', 'Spine2': 'Spine1', 'Head': 'Head',
     'ShoulderL': 'LeftShoulder', 'ArmL1': 'LeftArm', 'ArmL2': 'LeftForeArm', 'HandL': 'LeftHand',
@@ -228,33 +231,40 @@ def main():
     by_material = {}
     for material, corners in triangles:
         by_material.setdefault(material, []).extend(corners)
-    # Hair inside the cap: its own "UnderCap" material, which the game hides
-    # while the cap is on (jiggle.rs) and shows once it comes off. A hair
-    # triangle is under the cap when the cap's surface lies further out from
-    # the head's centre in the same direction.
+    # Hair the cap covers comes in two copies: "_InCap", pulled in to fit
+    # inside the cap (tools/cap_fit.py) and shown while the cap is on, so the
+    # hair never pokes through it and is still there when it tilts; and
+    # "_UnderCap", the hair as modelled, shown once the cap lifts or comes off
+    # (jiggle.rs). Hair the cap does not reach stays as it is.
     if cap_material:
+        from cap_fit import squash
         to_frame = lambda pts: (frame @ np.c_[pts, np.ones(len(pts))].T).T[:, :3]
+        from_frame = np.linalg.inv(frame)
         cap_points = to_frame(np.array([c[0] for c in by_material[cap_material]]))
         centre = joint_world['Head'][:3, 3].copy()
         centre[1] = (cap_points[:, 1].min() + centre[1]) / 2
-        cap_dirs = cap_points - centre
-        cap_reach = np.linalg.norm(cap_dirs, axis=1)
-        cap_dirs /= np.maximum(cap_reach[:, None], 1e-9)
         for material in [m for m in by_material if 'hair' in m.lower() and m != cap_material]:
             corners = by_material[material]
-            keep, under = [], []
+            if not corners:
+                continue
+            fitted, moved = squash(to_frame(np.array([c[0] for c in corners])), cap_points, centre, 0.004)
+            fitted = (from_frame @ np.c_[fitted, np.ones(len(fitted))].T).T[:, :3]
+            keep, inside, under = [], [], []
             for t in range(0, len(corners), 3):
                 tri = corners[t:t + 3]
-                c = to_frame(np.array([v[0] for v in tri])).mean(0)
-                d = c - centre
-                r = np.linalg.norm(d)
-                near = cap_dirs @ (d / max(r, 1e-9)) > np.cos(np.radians(10))
-                (under if near.any() and cap_reach[near].max() >= r - 0.004 / args.scale * 0.01 else keep).extend(tri)
+                if moved[t:t + 3].any():
+                    under.extend(tri)
+                    inside.extend((tuple(fitted[t + k]),) + tuple(tri[k][1:]) for k in range(3))
+                else:
+                    keep.extend(tri)
             by_material[material] = keep
+            stem = Path(material).stem
             if under:
-                by_material[Path(material).stem + '_UnderCap.png'] = under
-                # Same texture as the hair it came from.
-                undercap_texture[Path(material).stem + '_UnderCap.png'] = material
+                # Same texture as the hair they came from.
+                by_material[stem + '_UnderCap.png'] = under
+                by_material[stem + '_InCap.png'] = inside
+                undercap_texture[stem + '_UnderCap.png'] = material
+                undercap_texture[stem + '_InCap.png'] = material
     for material, corners in [(m, c) for m, c in by_material.items() if c]:
         positions = np.array([c[0] for c in corners])
         positions = (frame @ np.c_[positions, np.ones(len(positions))].T).T[:, :3].astype(np.float32)
