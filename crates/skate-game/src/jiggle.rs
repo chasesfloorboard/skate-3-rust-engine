@@ -14,7 +14,7 @@ impl Plugin for JigglePlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             PostUpdate,
-            (adopt, simulate).chain().after(bevy::transform::TransformSystems::Propagate),
+            (adopt, simulate, under_cap).chain().after(bevy::transform::TransformSystems::Propagate),
         );
     }
 }
@@ -205,5 +205,19 @@ fn simulate(
         *transform = local;
         *global = parent_global.mul_transform(local);
         updated.insert(entity, *global);
+    }
+}
+
+/// Hair the cap covers (material "…_UnderCap", tools/smd_to_mixamo.py) shows
+/// only while a cap is off: otherwise it pokes through the cap.
+fn under_cap(
+    caps: Query<&Jiggle>,
+    mut hair: Query<(&bevy::gltf::GltfMaterialName, &mut Visibility)>,
+) {
+    let off = caps.iter().any(|j| j.cap && j.loose.is_some());
+    for (name, mut visibility) in &mut hair {
+        if name.0.contains("UnderCap") {
+            visibility.set_if_neq(if off { Visibility::Inherited } else { Visibility::Hidden });
+        }
     }
 }

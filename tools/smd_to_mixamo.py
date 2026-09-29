@@ -224,10 +224,38 @@ def main():
 
     images = args.model.parent / 'images'
     textures = {}
+    undercap_texture = {}
     by_material = {}
     for material, corners in triangles:
         by_material.setdefault(material, []).extend(corners)
-    for material, corners in by_material.items():
+    # Hair inside the cap: its own "UnderCap" material, which the game hides
+    # while the cap is on (jiggle.rs) and shows once it comes off. A hair
+    # triangle is under the cap when the cap's surface lies further out from
+    # the head's centre in the same direction.
+    if cap_material:
+        to_frame = lambda pts: (frame @ np.c_[pts, np.ones(len(pts))].T).T[:, :3]
+        cap_points = to_frame(np.array([c[0] for c in by_material[cap_material]]))
+        centre = joint_world['Head'][:3, 3].copy()
+        centre[1] = (cap_points[:, 1].min() + centre[1]) / 2
+        cap_dirs = cap_points - centre
+        cap_reach = np.linalg.norm(cap_dirs, axis=1)
+        cap_dirs /= np.maximum(cap_reach[:, None], 1e-9)
+        for material in [m for m in by_material if 'hair' in m.lower() and m != cap_material]:
+            corners = by_material[material]
+            keep, under = [], []
+            for t in range(0, len(corners), 3):
+                tri = corners[t:t + 3]
+                c = to_frame(np.array([v[0] for v in tri])).mean(0)
+                d = c - centre
+                r = np.linalg.norm(d)
+                near = cap_dirs @ (d / max(r, 1e-9)) > np.cos(np.radians(10))
+                (under if near.any() and cap_reach[near].max() >= r - 0.004 / args.scale * 0.01 else keep).extend(tri)
+            by_material[material] = keep
+            if under:
+                by_material[Path(material).stem + '_UnderCap.png'] = under
+                # Same texture as the hair it came from.
+                undercap_texture[Path(material).stem + '_UnderCap.png'] = material
+    for material, corners in [(m, c) for m, c in by_material.items() if c]:
         positions = np.array([c[0] for c in corners])
         positions = (frame @ np.c_[positions, np.ones(len(positions))].T).T[:, :3].astype(np.float32)
         normals = np.array([c[1] for c in corners]) @ convert[:3, :3].T
@@ -252,7 +280,8 @@ def main():
                                    WEIGHTS_0=accessor(weights, gl.VEC4))
         mat = gl.Material(name=Path(material).stem, doubleSided=True,
                           pbrMetallicRoughness=gl.PbrMetallicRoughness(metallicFactor=0.0, roughnessFactor=0.7))
-        texture = next((p for p in images.glob('*') if p.name.lower() == material.lower()), None)
+        source = undercap_texture.get(material, material)
+        texture = next((p for p in images.glob('*') if p.name.lower() == source.lower()), None)
         if texture is not None:
             if texture not in textures:
                 gltf.images.append(gl.Image(bufferView=view(texture.read_bytes()), mimeType='image/png'))
