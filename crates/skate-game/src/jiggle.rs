@@ -48,7 +48,7 @@ struct Jiggle {
 fn tuning(name: &str) -> (f32, f32, f32, f32) {
     let name = name.to_ascii_lowercase();
     // (stiffness, damping ratio, gravity share, max swing radians)
-    if name.contains("cap") { (400.0, 0.6, 0.1, 0.35) }
+    if name.contains("cap") { (220.0, 0.45, 0.15, 0.5) } // loose enough to wobble while riding
     else if name.contains("mustache") { (260.0, 0.35, 0.2, 0.5) }
     else if name.contains("tail") { (70.0, 0.25, 0.3, 1.0) }
     else if name.contains("skirt") { (160.0, 0.45, 0.3, 0.6) }

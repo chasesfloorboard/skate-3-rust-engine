@@ -120,9 +120,13 @@ def main():
         if args.model.suffix.lower() == '.smd':
             # Odyssey rips (tools/smd_to_mixamo.py): body plus the first hand
             # pose and eyebrows (eyelids are blink shapes).
-            stem = args.model.stem
-            parts = [p for suffix in ('_LHand1', '_RHand1', '_Eyebrow1')
-                     for p in args.model.parent.glob(f'{stem}{suffix}.[Ss][Mm][Dd]')]
+            # Odyssey Mario outfits: the cap with the hair tucked under it
+            # (<stem>_Cap), else the loose hair (Mario_Hair).
+            stem, folder = args.model.stem, args.model.parent
+            find = lambda name: next(iter(folder.glob(f'{name}.[Ss][Mm][Dd]')), None)
+            parts = [p for suffix in ('_LHand1', '_RHand1', '_Eyebrow1') for p in [find(stem + suffix)] if p]
+            cap = find(stem + '_Cap')
+            parts += [cap] if cap else [p for p in [find(stem + '_Hair') or find('Mario_Hair')] if p]
             subprocess.run([sys.executable, str(HERE / 'smd_to_mixamo.py'), str(args.model), str(mixamo),
                             '--parts', *map(str, parts)], check=True)
         else:
