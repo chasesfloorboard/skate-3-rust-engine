@@ -41,7 +41,7 @@ SPINE = ['Spine', 'Spine1', 'Spine2', 'Neck']
 
 
 def scalp(gltf, cap, body, accessor, view, head, hair=None):
-    """A bald crown with a comb-over under a racer's cap: the rips model no
+    """A bare crown under a racer's cap: the rips model no
     head under the cap, so the head was open when the cap came off. An
     ellipsoid dome over the head mesh's open top (its highest ring under the
     cap), reaching up inside the crown, skinned to the head. It comes twice:
@@ -86,13 +86,8 @@ def scalp(gltf, cap, body, accessor, view, head, hair=None):
     normals = np.array(normals, np.float32)[corners]
     uvs = np.array(uvs, np.float32)[corners]
     if hair is None:
-        # Bald skin with a few dark strands combed across the crown.
+        # Plain skin: it only shows while the cap wobbles or lifts on a fall.
         image = Image.new('RGB', (128, 128), (250, 196, 150))
-        draw = ImageDraw.Draw(image)
-        for strand in range(5):
-            v = 34 + strand * 13
-            points = [(u, v + 4 * np.sin(u / 18 + strand)) for u in range(10, 120, 4)]
-            draw.line(points, fill=(70, 38, 18), width=4)
     else:
         # A full head of hair combed back, in the racer's hair colour.
         image = Image.new('RGB', (128, 128), hair)
@@ -173,7 +168,7 @@ def main():
     parser.add_argument('model', type=Path)
     parser.add_argument('out', type=Path)
     parser.add_argument('--scale', type=float, default=0.075)
-    parser.add_argument('--hair', default=None, help='RRGGBB hair colour under a cap (default: bald with a comb-over)')
+    parser.add_argument('--hair', default=None, help='RRGGBB hair colour under a cap (default: plain skin)')
     args = parser.parse_args()
     folder = args.model.parent
     document = collada.Collada(str(args.model), ignore=[collada.common.DaeUnsupportedError, collada.common.DaeBrokenRefError])

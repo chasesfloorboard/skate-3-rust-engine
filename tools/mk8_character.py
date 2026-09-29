@@ -168,9 +168,6 @@ def centre_rings(path):
     g.set_binary_blob(bytes(blob))
     g.save_binary(str(path))
 
-# Hair under the cap for capped racers (a racer without an entry gets a bald
-# crown with a comb-over).
-HAIR = {'Mario': '4a2812', 'Metal Mario': '4a2812', 'Luigi': '3a2010', 'Wario': '2e1a0e', 'Waluigi': '241a26'}
 
 
 def default_library():
@@ -203,7 +200,6 @@ def main():
     with tempfile.TemporaryDirectory(prefix='.mk8-', dir=library) as temp:
         temp = Path(temp)
         mixamo = temp / 'source.glb'
-        hair = ['--hair', HAIR[args.name]] if args.name in HAIR else []
         if args.model.suffix.lower() == '.smd':
             # Odyssey rips (tools/smd_to_mixamo.py): body plus the first hand
             # pose and eyebrows (eyelids are blink shapes).
@@ -217,7 +213,7 @@ def main():
             subprocess.run([sys.executable, str(HERE / 'smd_to_mixamo.py'), str(args.model), str(mixamo),
                             '--parts', *map(str, parts)], check=True)
         else:
-            subprocess.run([sys.executable, str(HERE / 'mk8_to_mixamo.py'), str(args.model), str(mixamo), *hair], check=True)
+            subprocess.run([sys.executable, str(HERE / 'mk8_to_mixamo.py'), str(args.model), str(mixamo)], check=True)
         if args.height is None:
             args.height = HEIGHTS.get(args.name, HEIGHTS.get(args.name.split(' (')[0]))
         if args.height is None:
@@ -236,6 +232,8 @@ def main():
         # No board: the player's own customised board stays under the character.
         import mk8_convert
         mk8_convert.SPIN = set(SPIN.get(args.name, ()))
+        # Mario Kart 8 caps stay on in a bail; Odyssey caps come off.
+        mk8_convert.KEEP = set() if args.model.suffix.lower() == '.smd' else {'cap'}
         report = convert_glb(mixamo, reference, staging / 'character.glb', include_board=False, keep_height=args.height)
         if mk8_convert.SPIN:
             centre_rings(staging / 'character.glb')

@@ -31,12 +31,18 @@ JIGGLE = ('hair', 'tail', 'skirt', 'ear', 'cap', 'mustache', 'sleeve', 'seleeve'
 # the caller per character: JIGGLE_SPIN_<name>.
 SPIN = set()
 
+# Jiggle joints that stay on in a bail (Mario Kart 8 caps: the racers have no
+# head modelled under them), set by the caller: JIGGLE_KEEP_<name>.
+KEEP = set()
+
 
 def jiggle_name(name):
     base = name.rsplit(':', 1)[-1]
     if not any(k in base.lower() for k in JIGGLE) or base.lower().startswith('mixamorig'):
         return None
-    return ('JIGGLE_SPIN_' if any(k in base.lower() for k in SPIN) else 'JIGGLE_') + base
+    if any(k in base.lower() for k in SPIN):
+        return 'JIGGLE_SPIN_' + base
+    return ('JIGGLE_KEEP_' if any(k in base.lower() for k in KEEP) else 'JIGGLE_') + base
 
 
 def sha(path):

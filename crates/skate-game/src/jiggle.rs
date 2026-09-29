@@ -32,6 +32,8 @@ struct Jiggle {
     gravity: f32,
     limit: f32,
     cap: bool,
+    /// Cap that stays on in a bail (JIGGLE_KEEP_: Mario Kart 8 racers).
+    keep: bool,
     /// Rings (JIGGLE_SPIN_): hang loose around the arm and spin about it.
     spin: Option<Ring>,
     /// Tip position and velocity in the world.
@@ -150,7 +152,7 @@ impl Ring {
 fn tuning(name: &str) -> (f32, f32, f32, f32) {
     let name = name.to_ascii_lowercase();
     // (stiffness, damping ratio, gravity share, max swing radians)
-    if name.contains("cap") { (330.0, 0.55, 0.1, 0.2) } // a small wobble while riding; more tips it into the head and bares the hair pulled in under it (cap_fit.py)
+    if name.contains("cap") { (220.0, 0.45, 0.15, 0.3) } // loose enough to wobble while riding
     else if name.contains("mustache") { (260.0, 0.35, 0.2, 0.5) }
     else if name.contains("tail") { (70.0, 0.25, 0.3, 1.0) }
     else if name.contains("skirt") { (160.0, 0.45, 0.3, 0.6) }
@@ -180,6 +182,7 @@ fn adopt(
         commands.entity(entity).insert(Jiggle {
             rest: *transform, tip, depth, stiffness, damping, gravity, limit,
             cap: name.as_str().to_ascii_lowercase().contains("cap"),
+            keep: name.as_str().starts_with("JIGGLE_KEEP_"),
             spin: name.as_str().starts_with("JIGGLE_SPIN_").then(|| {
                 // The ring's parent is the hand: its offset is the forearm.
                 let forearm = parents.get(entity).ok().and_then(|p| names.get(p.parent()).ok())
@@ -241,7 +244,7 @@ fn simulate(
         if j.cap {
             // Off in a bail: a loose cap falls, bounces and rests on the floor
             // the skater bailed on, until they are back up.
-            if bailing && j.loose.is_none() && j.ready {
+            if bailing && j.loose.is_none() && j.ready && !j.keep {
                 let start = Transform::from_matrix(Mat4::from(parent_affine * transform.compute_affine()));
                 let kick = root_velocity * 0.6 + Vec3::Y * 2.5;
                 j.loose = Some((start, kick, Vec3::new(3.0, 1.0, -2.0)));
