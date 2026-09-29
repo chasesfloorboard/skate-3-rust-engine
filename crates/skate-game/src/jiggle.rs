@@ -160,6 +160,8 @@ fn tuning(name: &str) -> (f32, f32, f32, f32) {
     else if name.contains("tail") { (70.0, 0.25, 0.3, 1.0) }
     else if name.contains("skirt") { (160.0, 0.45, 0.3, 0.6) }
     else if name.contains("ear") { (140.0, 0.3, 0.2, 0.7) }
+    // Tongues sit in the mouth: a small stiff wobble, no sag out of it.
+    else if name.contains("tongue") { (320.0, 0.6, 0.0, 0.25) }
     else { (100.0, 0.3, 0.4, 0.8) } // hair, sleeves, tongues, ribbons
 }
 

@@ -138,6 +138,44 @@ def scalp(gltf, cap, body, accessor, view, head, hair=None):
         gltf.scenes[0].nodes.append(len(gltf.nodes) - 1)
 
 
+def wrap_islands(positions, uvs):
+    """Eye UVs as the game wraps them: many racers' eyes sit a whole tile off
+    (u around -0.5) and relied on the texture repeating, but eye textures are
+    clamped (a repeat tiled extra pupils onto eyes whose UVs cross a tile
+    edge), which painted those eyes the texture's edge colour. Each connected
+    island of triangles moves back into the 0..1 tile by whole units.
+    `positions` and `uvs` are per corner (three per triangle)."""
+    corners = len(uvs)
+    parent = list(range(corners // 3))
+
+    def root(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    # Triangles sharing a corner (same position and UV) share an island.
+    seen = {}
+    for c in range(corners):
+        key = (tuple(np.round(positions[c], 5)), tuple(np.round(uvs[c], 5)))
+        t = c // 3
+        if key in seen:
+            a, b = root(seen[key]), root(t)
+            if a != b:
+                parent[a] = b
+        else:
+            seen[key] = t
+    islands = {}
+    for t in range(corners // 3):
+        islands.setdefault(root(t), []).append(t)
+    uvs = uvs.copy()
+    for triangles in islands.values():
+        rows = np.concatenate([np.arange(t * 3, t * 3 + 3) for t in triangles])
+        shift = np.floor(uvs[rows].mean(0))
+        uvs[rows] -= shift
+    return uvs
+
+
 def axis_fix(primitives, bind_shape, dominant, joint_position):
     """The axis-aligned rotation (of 24) that best seats bind-shape vertices on
     the joints weighting them most."""
@@ -356,6 +394,8 @@ def main():
             normals = (normals / np.maximum(np.linalg.norm(normals, axis=1, keepdims=True), 1e-9)).astype(np.float32)
             uvs = primitive.texcoordset[0][primitive.texcoord_indexset[0].reshape(-1)]
             uvs = np.c_[uvs[:, 0], 1.0 - uvs[:, 1]].astype(np.float32)
+            if any(k in (primitive.material or '').lower() for k in ('eye', 'pupil')):
+                uvs = wrap_islands(positions, uvs)
             if cap_joint is not None:
                 on_cap = (vj[corners][:, 0] == cap_joint) & (vw[corners][:, 0] > 0.5)
                 capped.append(positions[on_cap])

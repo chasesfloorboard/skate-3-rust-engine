@@ -170,6 +170,81 @@ def centre_rings(path):
 
 
 
+def retract_tongue(path, reach=0.14):
+    """Pull a tongue modelled sticking out (Yoshi's rip has it fully out, 1.3 m
+    long; the game retracts it by animation) back into the mouth: vertices on
+    the tongue joints squash along the tongue's axis until the tip lies
+    `reach` metres from its root, and the tip joint moves with them."""
+    import pygltflib
+    g = pygltflib.GLTF2().load(str(path))
+    blob = bytearray(g.binary_blob())
+
+    def acc(i):
+        a = g.accessors[i]
+        v = g.bufferViews[a.bufferView]
+        n = {'SCALAR': 1, 'VEC2': 2, 'VEC3': 3, 'VEC4': 4, 'MAT4': 16}[a.type]
+        dt = {5126: np.float32, 5123: np.uint16, 5125: np.uint32, 5121: np.uint8}[a.componentType]
+        start = (v.byteOffset or 0) + (a.byteOffset or 0)
+        return np.frombuffer(bytes(blob), dt, a.count * n, start).reshape(a.count, n).copy(), start
+
+    skin = g.skins[0]
+    names = [g.nodes[j].name for j in skin.joints]
+    tongue = [i for i, n in enumerate(names) if n.startswith('JIGGLE') and 'tongue' in n.lower()]
+    if not tongue:
+        return
+    binds, binds_at = acc(skin.inverseBindMatrices)
+    world = [np.linalg.inv(b.reshape(4, 4).T) for b in binds]
+    root = world[tongue[0]][:3, 3]
+    prims = [p for n in g.nodes if n.mesh is not None for p in g.meshes[n.mesh].primitives]
+    points = []
+    for p in prims:
+        pos, _ = acc(p.attributes.POSITION)
+        jj, _ = acc(p.attributes.JOINTS_0)
+        ww, _ = acc(p.attributes.WEIGHTS_0)
+        points.append(pos[(ww * np.isin(jj, tongue)).sum(1) > 0.5])
+    points = np.concatenate(points)
+    if not len(points):
+        return
+    offsets = points - root
+    tip = offsets[np.argmax(np.linalg.norm(offsets, axis=1))]
+    length = np.linalg.norm(tip)
+    if length <= reach * 1.5:
+        return
+    axis = tip / length
+    factor = reach / length
+
+    def squash(p):
+        d = p - root
+        along = d @ axis
+        return p - np.outer(along * (1 - factor), axis) if d.ndim > 1 else p - axis * along * (1 - factor)
+
+    for p in prims:
+        pos, at = acc(p.attributes.POSITION)
+        jj, _ = acc(p.attributes.JOINTS_0)
+        ww, _ = acc(p.attributes.WEIGHTS_0)
+        share = (ww * np.isin(jj, tongue)).sum(1)
+        mine = share > 0.0
+        if mine.any():
+            # Blend by weight so the tongue's root stays joined to the mouth.
+            pos[mine] = pos[mine] + (squash(pos[mine]) - pos[mine]) * share[mine, None]
+            blob[at:at + pos.nbytes] = pos.astype(np.float32).tobytes()
+            a = g.accessors[p.attributes.POSITION]
+            a.min, a.max = pos.min(0).tolist(), pos.max(0).tolist()
+    parent = {c: i for i, n in enumerate(g.nodes) for c in (n.children or [])}
+    joint_of = {node: i for i, node in enumerate(skin.joints)}
+    for i in tongue[1:]:
+        world[i][:3, 3] = squash(world[i][:3, 3])
+        binds[i] = np.linalg.inv(world[i]).T.reshape(-1)
+    for i in tongue:
+        up = joint_of.get(parent.get(skin.joints[i]))
+        if up is not None:
+            g.nodes[skin.joints[i]].matrix = (np.linalg.inv(world[up]) @ world[i]).T.reshape(-1).tolist()
+    blob[binds_at:binds_at + binds.nbytes] = binds.astype(np.float32).tobytes()
+    g.set_binary_blob(bytes(blob))
+    g.save_binary(str(path))
+    print(f'tongue retracted from {length:.2f} m to {reach:.2f} m')
+
+
 def cap_box(path):
     """Give a loose-able cap (JIGGLE_Cap) a collision box for jiggle.rs: a
     CAPBOX child node of the cap joint whose translation is the cap mesh's
@@ -279,6 +354,7 @@ def main():
             centre_rings(staging / 'character.glb')
         if not mk8_convert.KEEP:
             cap_box(staging / 'character.glb')
+        retract_tongue(staging / 'character.glb')
         sole, _, foot_y = soles(staging / 'character.glb')
         if sole is not None:
             report['ankle'] = float(foot_y - sole)
