@@ -308,11 +308,12 @@ fn draw(
     mut images: ResMut<Assets<Image>>,
     mut shown: Local<Option<(String, Option<Handle<Image>>)>>,
 ) {
-    root.display = if menu.open {
+    let display = if menu.open {
         Display::Flex
     } else {
         Display::None
     };
+    if root.display != display { root.display = display; }
     if !menu.open {
         return;
     }

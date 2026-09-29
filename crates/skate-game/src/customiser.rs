@@ -1178,11 +1178,12 @@ fn draw(
     window: Single<&Window>,
     mut root: Single<(Entity, &mut Node), With<Root>>,
 ) {
-    root.1.display = if state.open {
+    let display = if state.open {
         Display::Flex
     } else {
         Display::None
     };
+    if root.1.display != display { root.1.display = display; }
     if !state.open {
         return;
     }

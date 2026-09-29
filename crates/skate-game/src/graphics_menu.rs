@@ -891,11 +891,12 @@ fn labels(
     mut status: Single<&mut Text, With<StatusLabel>>,
     mut buttons: Query<(&MenuRow, &Interaction, &mut BackgroundColor, &mut Node), Without<MenuRoot>>,
 ) {
-    root.display = if menu.open && !mods.open && !travel.open && !customiser.open && !custom_models.open {
+    let display = if menu.open && !mods.open && !travel.open && !customiser.open && !custom_models.open {
         Display::Flex
     } else {
         Display::None
     };
+    if root.display != display { root.display = display; }
     if !menu.open {
         return;
     }

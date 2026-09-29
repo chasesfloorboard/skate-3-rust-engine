@@ -575,7 +575,11 @@ fn draw(
     )>,
 ) {
     let visible = pause.open && !menu.open && !custom.open;
-    for (root, mut node, mut z) in &mut roots {
+    for (root, mut current, mut z) in &mut roots {
+        // Written without change detection, flagged only if it differs:
+        // a changed Node relayouts the whole UI every frame.
+        let before = current.clone();
+        let node = current.bypass_change_detection();
         if let Some(layout) = panel.layouts.get(&root.0) {
             node.display = if visible
                 && mods
@@ -609,15 +613,25 @@ fn draw(
                 12
             };
         }
+        if *node != before { current.set_changed(); }
     }
-    for (body, mut node) in &mut bodies {
+    for (body, mut current) in &mut bodies {
+        // Written without change detection, flagged only if it differs:
+        // a changed Node relayouts the whole UI every frame.
+        let before = current.clone();
+        let node = current.bypass_change_detection();
         node.display = if panel.layouts.get(&body.0).is_some_and(|l| !l.collapsed) {
             Display::Flex
         } else {
             Display::None
         };
+        if *node != before { current.set_changed(); }
     }
-    for (row, mut node, mut color) in &mut rows {
+    for (row, mut current, mut color) in &mut rows {
+        // Written without change detection, flagged only if it differs:
+        // a changed Node relayouts the whole UI every frame.
+        let before = current.clone();
+        let node = current.bypass_change_detection();
         let selected = panel.layouts.get(&row.0).map_or(0, |l| l.selected);
         let index = row.1;
         node.display = if mods
@@ -635,6 +649,7 @@ fn draw(
         } else {
             Color::srgb(0.08, 0.11, 0.15)
         };
+        if *node != before { current.set_changed(); }
     }
     for (mut t, label, value, hint, collapse) in &mut text {
         if let Some(c) = collapse {

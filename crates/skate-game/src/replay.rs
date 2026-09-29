@@ -290,11 +290,12 @@ fn update_ui(
     mut bars: Query<&mut Node, (With<Playhead>, Without<ReplayUi>)>,
 ) {
     for mut node in &mut roots {
-        node.display = if replay.active {
+        let display = if replay.active {
             Display::Flex
         } else {
             Display::None
         };
+        if node.display != display { node.display = display; }
     }
     if !replay.active {
         return;

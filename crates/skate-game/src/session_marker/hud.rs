@@ -167,12 +167,9 @@ fn present(
 ) {
     let scale = (window.width() / 1280.).min(window.height() / 720.);
     for (mut transform, mut visibility) in &mut roots {
-        *visibility = if session.visible {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        };
-        transform.translation = Vec3::new(-window.width() / 2., window.height() / 2., 0.);
-        transform.scale = Vec3::splat(scale);
+        visibility.set_if_neq(if session.visible { Visibility::Inherited } else { Visibility::Hidden });
+        let translation = Vec3::new(-window.width() / 2., window.height() / 2., 0.);
+        if transform.translation != translation { transform.translation = translation; }
+        if transform.scale != Vec3::splat(scale) { transform.scale = Vec3::splat(scale); }
     }
 }
