@@ -133,7 +133,7 @@ pub(crate) struct WorldParams {
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
 #[bind_group_data(RetailKey)]
 #[data(0, WorldParams, binding_array(17))]
-#[bindless(limit(64))]
+#[bindless(limit(1024))]
 pub(crate) struct RetailWorldMaterial {
     pub params: WorldParams,
     #[texture(1)]
