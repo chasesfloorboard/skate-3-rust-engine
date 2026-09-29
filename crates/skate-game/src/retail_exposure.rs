@@ -25,6 +25,8 @@ use std::{collections::VecDeque, sync::Mutex};
 struct Settings {
     tuning: Vec4,
     timing: Vec4,
+    /// The map's authored tuning, before the Ambient light setting scales it.
+    authored: Vec4,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -32,6 +34,7 @@ impl Default for Settings {
         Self {
             tuning: Vec4::new(0., 2.5, 2.5, 0.),
             timing: Vec4::ZERO,
+            authored: Vec4::new(0., 2.5, 2.5, 0.),
         }
     }
 }
@@ -97,6 +100,7 @@ fn load(config: Res<crate::config::Config>, retail: Res<super::RetailScene>, mut
             && a.damping >= 0.
         {
             settings.tuning = Vec4::new(a.target_luminance, a.min, a.max, a.damping);
+            settings.authored = settings.tuning;
             info!(
                 "RETAIL_EXPOSURE: authored target={} range={}..{} damping={}; portable GPU meter",
                 a.target_luminance, a.min, a.max, a.damping
@@ -104,8 +108,14 @@ fn load(config: Res<crate::config::Config>, retail: Res<super::RetailScene>, mut
         }
     }
 }
-fn advance(time: Res<Time>, mut settings: ResMut<Settings>, frame: Res<super::ShadowState>) {
+fn advance(time: Res<Time>, mut settings: ResMut<Settings>, frame: Res<super::ShadowState>,
+           menu: Option<Res<crate::graphics_menu::Menu>>) {
     settings.timing.x = time.delta_secs().clamp(0., 0.05);
+    // Ambient light setting: scales the metered target and the exposure
+    // range, so it brightens or darkens days too (and with the cycle off).
+    let scale = menu.map_or(1.0, |m| m.ambient_exposure());
+    let tuning = settings.authored * Vec4::new(scale, scale, scale, 1.0);
+    if settings.tuning != tuning { settings.tuning = tuning; }
     // Day/night grade amount for the tone pass (day_cycle.rs); applied after
     // metering, so auto-exposure cannot undo it.
     settings.timing.z = frame.1.z;

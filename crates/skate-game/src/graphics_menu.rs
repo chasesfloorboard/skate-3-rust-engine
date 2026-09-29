@@ -30,7 +30,7 @@ const RESOLUTIONS: &[(u32, u32)] = &[
 ];
 const SCALES: &[u32] = &[25, 50, 67, 75, 85, 100];
 const DAY_SPEEDS: &[u32] = &[0, 1, 10, 30, 60, 120, 360, 720];
-const LIMITS: &[u32] = &[0, 30, 60, 90, 120, 144, 165, 240];
+const LIMITS: &[u32] = &[0, 30, 60, 90, 120, 144, 165, 240, 300, 400];
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -231,7 +231,7 @@ impl Menu {
     }
     /// Rows whose value Left/Right cycles; the rest only react to A/Enter.
     fn adjustable(&self, row: usize) -> bool {
-        if self.audio { row < 4 } else if self.daylight { row < 5 } else if self.multiplayer || self.browser { false } else { row <= 6 || row == 17 }
+        if self.audio { row < 4 } else if self.daylight { row < 5 } else if self.multiplayer || self.browser { false } else { row <= 6 || row == 17 || (19..=22).contains(&row) }
     }
     /// The tabbed top level, as opposed to a submenu with its own rows.
     pub(crate) fn in_tabs(&self) -> bool {
@@ -254,6 +254,11 @@ impl Menu {
     }
     pub(crate) fn ambient_brightness(&self, automatic: f32) -> f32 {
         self.settings.ambient_level.map_or(automatic, |level| level as f32 * 10.)
+    }
+    /// Exposure scale from the Ambient light setting: Auto and 50% leave the
+    /// map's own exposure, 0% halves it, 100% gives half as much again.
+    pub(crate) fn ambient_exposure(&self) -> f32 {
+        self.settings.ambient_level.map_or(1.0, |level| 0.5 + level as f32 / 100.)
     }
     /// How deep the retail night grade goes (day_cycle.rs): Auto keeps the
     /// authored night, 0% is darker still, 100% leaves night almost as bright
@@ -1079,10 +1084,25 @@ fn pace(menu: Option<Res<Menu>>, mut pacer: ResMut<FramePacer>) {
         return;
     };
     if menu.settings.fps > 0 {
+        // Sleep overshoots by a millisecond or more, which made capped frames
+        // land unevenly (visible hitches): sleep to just short of the frame's
+        // slot, then spin the rest. Slots advance by whole periods so one late
+        // frame does not push every later one back.
         let period = Duration::from_secs_f64(1. / f64::from(menu.settings.fps));
-        if let Some(wait) = period.checked_sub(pacer.0.elapsed()) {
-            std::thread::sleep(wait);
+        let deadline = pacer.0 + period;
+        let now = Instant::now();
+        if deadline > now {
+            let wait = deadline - now;
+            if wait > Duration::from_micros(1500) {
+                std::thread::sleep(wait - Duration::from_micros(1200));
+            }
+            while Instant::now() < deadline { std::hint::spin_loop(); }
+            pacer.0 = deadline;
+        } else {
+            // Running behind: start the next slot from now.
+            pacer.0 = now;
         }
+        return;
     }
     pacer.0 = Instant::now();
 }
@@ -1103,6 +1123,8 @@ mod tests {
         app.insert_resource(SceneTarget(target.clone()))
             .insert_resource(images)
             .insert_resource(Menu {
+                movie: 0,
+                play_movie: None,
                 open: false, selected: 0, settings: GraphicsSettings::default(),
                 difficulty: Difficulty::Easy, path: PathBuf::new(), supported_msaa: vec![1, 2, 4, 8], status: String::new(),
                 multiplayer: false, browser: false, daylight: false,
@@ -1176,7 +1198,7 @@ mod tests {
             UVec2::new(960, 540)
         );
         assert_eq!(s.internal_size(UVec2::ZERO), UVec2::ONE);
-        assert_eq!(cycle(LIMITS, 0, -1), 240);
-        assert_eq!(cycle(LIMITS, 240, 1), 0);
+        assert_eq!(cycle(LIMITS, 0, -1), 400);
+        assert_eq!(cycle(LIMITS, 400, 1), 0);
     }
 }
