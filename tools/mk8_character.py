@@ -170,6 +170,46 @@ def centre_rings(path):
 
 
 
+def cap_box(path):
+    """Give a loose-able cap (JIGGLE_Cap) a collision box for jiggle.rs: a
+    CAPBOX child node of the cap joint whose translation is the cap mesh's
+    centre and whose scale is its half extents, in the joint's space."""
+    import pygltflib
+    g = pygltflib.GLTF2().load(str(path))
+    blob = g.binary_blob()
+
+    def acc(i):
+        a = g.accessors[i]
+        v = g.bufferViews[a.bufferView]
+        n = {'SCALAR': 1, 'VEC2': 2, 'VEC3': 3, 'VEC4': 4, 'MAT4': 16}[a.type]
+        dt = {5126: np.float32, 5123: np.uint16, 5125: np.uint32, 5121: np.uint8}[a.componentType]
+        return np.frombuffer(blob, dt, a.count * n, (v.byteOffset or 0) + (a.byteOffset or 0)).reshape(a.count, n)
+
+    skin = g.skins[0]
+    names = [g.nodes[j].name for j in skin.joints]
+    if 'JIGGLE_Cap' not in names:
+        return
+    cap = names.index('JIGGLE_Cap')
+    to_joint = acc(skin.inverseBindMatrices).reshape(-1, 4, 4)[cap].T
+    points = []
+    for node in g.nodes:
+        if node.mesh is None:
+            continue
+        for p in g.meshes[node.mesh].primitives:
+            pos, jj, ww = acc(p.attributes.POSITION), acc(p.attributes.JOINTS_0), acc(p.attributes.WEIGHTS_0)
+            points.append(pos[((jj == cap) * ww).sum(1) > 0.5])
+    points = np.concatenate(points)
+    if len(points) < 4:
+        return
+    local = (to_joint @ np.c_[points, np.ones(len(points))].T).T[:, :3]
+    low, high = local.min(0), local.max(0)
+    g.nodes.append(pygltflib.Node(name='CAPBOX', translation=((low + high) / 2).tolist(),
+                                  scale=np.maximum((high - low) / 2, 1e-3).tolist()))
+    joint = g.nodes[skin.joints[cap]]
+    joint.children = (joint.children or []) + [len(g.nodes) - 1]
+    g.save_binary(str(path))
+
+
 def default_library():
     data = os.environ.get('XDG_DATA_HOME') or str(Path.home() / '.local/share')
     return Path(data) / 'Skate3RustEngine/custom-characters'
@@ -237,6 +277,8 @@ def main():
         report = convert_glb(mixamo, reference, staging / 'character.glb', include_board=False, keep_height=args.height)
         if mk8_convert.SPIN:
             centre_rings(staging / 'character.glb')
+        if not mk8_convert.KEEP:
+            cap_box(staging / 'character.glb')
         sole, _, foot_y = soles(staging / 'character.glb')
         if sole is not None:
             report['ankle'] = float(foot_y - sole)

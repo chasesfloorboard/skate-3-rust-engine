@@ -45,6 +45,9 @@ struct Jiggle {
     lift: f32,
     loose: Option<(Transform, Vec3, Vec3)>,
     floor: f32,
+    /// Cap: its collision box in the joint's space (centre as translation,
+    /// half extents as scale), from the importer's CAPBOX node.
+    bounds: Option<Transform>,
 }
 
 /// A ring around an arm (Wendy's wrist hoops). The converter puts the joint
@@ -179,6 +182,8 @@ fn adopt(
         let depth = parents.iter_ancestors(entity)
             .filter(|&a| names.get(a).is_ok_and(|(n, _)| n.as_str().starts_with("JIGGLE_"))).count();
         let (stiffness, damping, gravity, limit) = tuning(name.as_str());
+        let bounds = children.and_then(|c| c.iter().find_map(|c| names.get(c).ok()
+            .filter(|(n, _)| n.as_str() == "CAPBOX").map(|(_, t)| *t)));
         commands.entity(entity).insert(Jiggle {
             rest: *transform, tip, depth, stiffness, damping, gravity, limit,
             cap: name.as_str().to_ascii_lowercase().contains("cap"),
@@ -190,7 +195,7 @@ fn adopt(
                 Ring::new(transform, forearm)
             }),
             position: Vec3::ZERO, velocity: Vec3::ZERO, ready: false,
-            lift: 0.0, loose: None, floor: 0.0,
+            lift: 0.0, loose: None, floor: 0.0, bounds,
         });
     }
 }
@@ -198,7 +203,7 @@ fn adopt(
 fn simulate(
     time: Res<Time>,
     skater: Res<crate::physics::SkaterRuntime>,
-    physics: Res<crate::physics::GamePhysics>,
+    mut physics: ResMut<crate::physics::GamePhysics>,
     mut last_root: Local<Option<Vec3>>,
     mut settled: Local<f32>,
     mut jiggles: Query<(Entity, &mut Jiggle, &mut Transform, &mut GlobalTransform, &ChildOf)>,
@@ -250,11 +255,27 @@ fn simulate(
                 j.loose = Some((start, kick, Vec3::new(3.0, 1.0, -2.0)));
                 j.floor = ground;
             }
+            if let (Some((world, velocity, spin)), Some(bounds)) = (j.loose, j.bounds) {
+                if *settled > 0.6 {
+                    j.loose = None;
+                    j.ready = false;
+                } else {
+                    // A rigid box against the world, like the props.
+                    let (world, velocity, spin) = tumble(&mut physics, world, velocity, spin, &bounds, dt);
+                    j.loose = Some((world, velocity, spin));
+                    *transform = Transform::from_matrix(parent_global.to_matrix().inverse() * world.to_matrix());
+                    *global = GlobalTransform::from(world);
+                    updated.insert(entity, *global);
+                    continue;
+                }
+            }
             if let Some((mut world, mut velocity, spin)) = j.loose {
                 if *settled > 0.6 {
                     j.loose = None;
                     j.ready = false;
                 } else {
+                    // No collision box (an older import): fall to the floor the
+                    // skater bailed on.
                     // The body keeps falling and sliding: follow its ground down.
                     j.floor = j.floor.min(ground);
                     velocity.y -= 9.8 * dt;
@@ -314,6 +335,91 @@ fn simulate(
         *global = parent_global.mul_transform(local);
         updated.insert(entity, *global);
     }
+}
+
+/// One step of a cap loose in a bail: a light box under gravity, bounced off
+/// and slid along the world geometry (kerbs, ramps, stairs) with the props'
+/// contact response. `world` is the cap joint; `bounds` its box in joint space.
+fn tumble(
+    physics: &mut crate::physics::GamePhysics,
+    mut world: Transform,
+    mut velocity: Vec3,
+    mut angular: Vec3,
+    bounds: &Transform,
+    dt: f32,
+) -> (Transform, Vec3, Vec3) {
+    use skate_core::physics::{board_step::CollisionBody, board_world::BoardWorldVolume,
+                              contact::RetailContactMaterial, world_contact::ContactPrimitive};
+    const MASS: f32 = 0.15;
+    const MATERIAL: RetailContactMaterial = RetailContactMaterial { static_friction: 0.6, dynamic_friction: 0.45, restitution: 0.3 };
+    let v3 = |v: Vec3| skate_core::math::Vector3::new(v.x, v.y, v.z);
+    let from = |v: skate_core::math::Vector3| Vec3::new(v.x, v.y, v.z);
+    velocity.y -= 9.8 * dt;
+    // Sub-steps: a thin fast cap would otherwise pass through kerbs.
+    let steps = ((velocity.length() * dt / 0.03).ceil() as usize).clamp(1, 4);
+    let h = dt / steps as f32;
+    let half = (world.scale * bounds.scale).abs().max(Vec3::splat(0.02));
+    let inverse_mass = 1.0 / MASS;
+    let (a, b, c) = (half * 2.0).into();
+    let local_inertia = Vec3::new(1.0 / (MASS / 12.0 * (b * b + c * c)), 1.0 / (MASS / 12.0 * (a * a + c * c)), 1.0 / (MASS / 12.0 * (a * a + b * b)));
+    let mut touching = false;
+    for _ in 0..steps {
+        world.translation += velocity * h;
+        world.rotation = (Quat::from_scaled_axis(angular * h) * world.rotation).normalize();
+        let centre = world.transform_point(bounds.translation);
+        let basis = Mat3::from_quat(world.rotation);
+        let radius = half.min_element().min(0.02);
+        let volume = [BoardWorldVolume {
+            body: CollisionBody::Attached(0),
+            primitive: ContactPrimitive::RoundedBox {
+                center: v3(centre),
+                basis: skate_core::math::Basis3 { columns: basis.to_cols_array_2d() },
+                half_extents: v3(half - Vec3::splat(radius)),
+                radius,
+            },
+            linear_velocity: v3(velocity),
+            material: MATERIAL,
+        }];
+        let inverse_inertia = basis * Mat3::from_diagonal(local_inertia) * basis.transpose();
+        for contact in physics.query_world(&volume) {
+            // Normals point from the world toward the cap.
+            let normal = from(contact.contact.normal).normalize_or_zero();
+            if normal == Vec3::ZERO { continue; }
+            touching = true;
+            let (on_cap, on_world) = (from(contact.contact.position_on_a), from(contact.contact.position_on_b));
+            let depth = (on_world - on_cap).dot(normal);
+            if depth > 0.0 { world.translation += normal * depth; }
+            let r = on_cap - centre;
+            let approach = (velocity + angular.cross(r)).dot(normal);
+            if approach >= 0.0 { continue; }
+            let effective = inverse_mass + normal.dot((inverse_inertia * r.cross(normal)).cross(r));
+            let restitution = if approach < -1.0 { MATERIAL.restitution } else { 0.0 };
+            let j = -(1.0 + restitution) * approach / effective.max(1e-6);
+            velocity += normal * j * inverse_mass;
+            angular += inverse_inertia * r.cross(normal * j);
+            let point = velocity + angular.cross(r);
+            let slide = point - normal * point.dot(normal);
+            let speed = slide.length();
+            if speed > 1e-4 {
+                let t = slide / speed;
+                let effective_t = inverse_mass + t.dot((inverse_inertia * r.cross(t)).cross(r));
+                let jt = (speed / effective_t.max(1e-6)).min(MATERIAL.dynamic_friction * j);
+                velocity -= t * jt * inverse_mass;
+                angular -= inverse_inertia * r.cross(t * jt);
+            }
+        }
+    }
+    // Rolling resistance on the ground, a little air drag otherwise; come to
+    // rest rather than creep.
+    angular *= 1.0 - ((if touching { 4.0 } else { 0.3 }) * dt).min(0.5);
+    if touching {
+        velocity *= 1.0 - (1.5 * dt).min(0.5);
+        if velocity.length() < 0.08 && angular.length() < 0.3 {
+            velocity = Vec3::ZERO;
+            angular = Vec3::ZERO;
+        }
+    }
+    (world, velocity, angular)
 }
 
 /// Hair the cap covers comes twice (tools/cap_fit.py): "…_InCap", pulled in
