@@ -50,7 +50,10 @@ struct Jiggle {
 /// centre_rings), and moves the ring in until it clears the arm whichever way
 /// it hangs. Here it hangs toward gravity (less the arm's acceleration), rolls
 /// round the arm as that direction turns, and spins about its own centre, so it
-/// never passes through the arm.
+/// never passes through the arm. It also slides up the forearm: it floats up
+/// while airborne, jolts (landings, bails) knock it up, and raised hands let it
+/// slide toward the elbow. It comes back to rest on the wrist and never goes
+/// past it.
 struct Ring {
     /// Arm axis and the ring's distance along it, in the parent (hand) space.
     axis: Vec3,
@@ -60,31 +63,44 @@ struct Ring {
     dir: Vec3,
     angle: f32,
     rate: f32,
-    /// The arm point's last world position and velocity.
-    last: Option<(Vec3, Vec3)>,
+    /// Distance slid up the arm from the wrist, its speed, and the furthest
+    /// it goes (short of the elbow, where the arm widens).
+    slide: f32,
+    slide_speed: f32,
+    reach: f32,
+    /// The arm point's last world position, velocity and acceleration.
+    last: Option<(Vec3, Vec3, Vec3)>,
 }
 
 impl Ring {
-    fn new(rest: &Transform) -> Self {
+    /// `forearm`: the hand's distance from the elbow, in the hand's parent units.
+    fn new(rest: &Transform, forearm: f32) -> Self {
         let axis = (rest.rotation * Vec3::Y).normalize_or(Vec3::Y);
         let along = rest.translation.dot(axis);
         let off = rest.translation - axis * along;
         Ring { axis, along, hang: off.length(), dir: off.try_normalize().unwrap_or_else(|| axis.any_orthonormal_vector()),
-               angle: 0.0, rate: 0.0, last: None }
+               angle: 0.0, rate: 0.0, slide: 0.0, slide_speed: 0.0,
+               // The rest spot's distance from the elbow, less a fifth of the
+               // forearm kept clear of the elbow.
+               reach: (forearm + along - 0.2 * forearm).max(0.0), last: None }
     }
 
     /// The ring's local transform this frame under a parent turned by `parent`
     /// whose origin is at `origin`.
-    fn step(&mut self, rest: &Transform, parent: Quat, origin: Vec3, dt: f32) -> Transform {
-        let (velocity, accel) = match self.last {
-            Some((last, last_velocity)) => {
-                let velocity = (origin - last) / dt;
-                (velocity, ((velocity - last_velocity) / dt).clamp_length_max(80.0))
+    fn step(&mut self, rest: &Transform, parent: Quat, origin: Vec3, airborne: bool, dt: f32) -> Transform {
+        let (velocity, accel, jolt) = match self.last {
+            Some((last, last_velocity, last_accel)) => {
+                // Smoothed: frame-time jitter at speed reads as sharp jolts.
+                let velocity = last_velocity.lerp((origin - last) / dt, (30.0 * dt).min(1.0));
+                let accel = ((velocity - last_velocity) / dt).clamp_length_max(80.0);
+                (velocity, accel, accel.distance(last_accel))
             }
-            None => (Vec3::ZERO, Vec3::ZERO),
+            None => (Vec3::ZERO, Vec3::ZERO, 0.0),
         };
         // A jump (teleport, respawn) starts the ring afresh.
-        self.last = Some((origin, if velocity.length() > 40.0 { Vec3::ZERO } else { velocity }));
+        let restart = velocity.length() > 40.0;
+        self.last = Some((origin, if restart { Vec3::ZERO } else { velocity }, if restart { Vec3::ZERO } else { accel }));
+        let jolt = if restart { 0.0 } else { jolt };
         let axis_world = parent * self.axis;
         let pull = Vec3::NEG_Y * 9.8 - accel;
         let across = pull - axis_world * pull.dot(axis_world);
@@ -101,8 +117,30 @@ impl Ring {
         self.rate *= (1.0 - 1.2 * dt).max(0.0);
         self.rate = self.rate.clamp(0.3, 20.0);
         self.angle = (self.angle + self.rate * dt - rolled * 0.6) % std::f32::consts::TAU;
+        // Up the arm: toward the elbow (the axis runs elbow to hand). Airborne,
+        // the ring drifts up most of the way; on the ground a spring settles it
+        // on the wrist. Gravity along the arm slides it when the hand is raised,
+        // and sharp changes in the arm's motion knock it up.
+        let up_arm = -axis_world;
+        let target = if airborne { 0.7 * self.reach } else { 0.0 };
+        // In the air the ring is weightless, so only the spring moves it.
+        let gravity = if airborne { 0.0 } else { 0.5 * 9.8 * Vec3::NEG_Y.dot(up_arm) };
+        let pull = 40.0 * (target - self.slide) + gravity - 6.0 * self.slide_speed;
+        self.slide_speed += pull * dt;
+        if jolt > 20.0 {
+            self.slide_speed += ((jolt - 20.0) * 0.004).min(1.0);
+        }
+        self.slide += self.slide_speed * dt;
+        // The wrist and the elbow end stop it, with a small bounce.
+        if self.slide < 0.0 {
+            self.slide = 0.0;
+            self.slide_speed = (-self.slide_speed * 0.25).max(0.0);
+        } else if self.slide > self.reach {
+            self.slide = self.reach;
+            self.slide_speed = (-self.slide_speed * 0.25).min(0.0);
+        }
         Transform {
-            translation: self.axis * self.along + self.dir * self.hang,
+            translation: self.axis * (self.along - self.slide) + self.dir * self.hang,
             rotation: (Quat::from_axis_angle(self.axis, self.angle) * rest.rotation).normalize(),
             scale: rest.scale,
         }
@@ -142,7 +180,12 @@ fn adopt(
         commands.entity(entity).insert(Jiggle {
             rest: *transform, tip, depth, stiffness, damping, gravity, limit,
             cap: name.as_str().to_ascii_lowercase().contains("cap"),
-            spin: name.as_str().starts_with("JIGGLE_SPIN_").then(|| Ring::new(transform)),
+            spin: name.as_str().starts_with("JIGGLE_SPIN_").then(|| {
+                // The ring's parent is the hand: its offset is the forearm.
+                let forearm = parents.get(entity).ok().and_then(|p| names.get(p.parent()).ok())
+                    .map_or(0.0, |(_, hand)| hand.translation.length());
+                Ring::new(transform, forearm)
+            }),
             position: Vec3::ZERO, velocity: Vec3::ZERO, ready: false,
             lift: 0.0, loose: None, floor: 0.0,
         });
@@ -187,7 +230,7 @@ fn simulate(
         let origin: Vec3 = rest_world.translation.into();
         let target = rest_world.transform_point3(j.tip);
         if let Some(mut ring) = j.spin.take() {
-            let local = ring.step(&j.rest, parent_global.rotation(), parent_global.translation(), dt);
+            let local = ring.step(&j.rest, parent_global.rotation(), parent_global.translation(), airborne && !bailing, dt);
             j.spin = Some(ring);
             *transform = local;
             *global = parent_global.mul_transform(local);
