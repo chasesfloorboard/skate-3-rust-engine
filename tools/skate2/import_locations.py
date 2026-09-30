@@ -84,6 +84,35 @@ LOCATIONS = [
              'Z_Waterfront': 'ss_wf_0_waterfront', 'A_StartWaterFront_SeaWall': 'ss_wf_8_stairset'}),
 ]
 
+# More city spots without FE photos: the Mega Ramp starts, the extra retail
+# starts, and every F_ freeskate spot (named from its locator, see city_extras).
+CITY_EXTRAS = {
+    'megaRampClassicStart_global': 'Mega Ramp', 'megaRampTechStart1': 'Mega Ramp (Tech)',
+    'HipRampStart_global': 'Mega Ramp Hip', 'SideRampStart_global': 'Mega Ramp Side',
+    'Z_DT4_SkatelineStart': 'Skateline', 'Z_DT8_Matrix_Skate1Dyrdek': 'The Matrix (Dyrdek)',
+    'Z_PJ03_BackAlleyStart': 'Back Alley', 'Z_PJ08_StockholmBestPlaceOnEarth': 'Best Place on Earth',
+    'Z_SVM_DropSomeE': 'Drop Some E', 'Z_TrainingStart': 'Training Facility',
+}
+F_NAMES = {'F_UR_ur': 'Urban Residential', 'F_WF_GVR': 'GVR', 'F_DT_Interior': 'Downtown Interior',
+           'F_OT_Oldtown': 'Old Town', 'F_DT_MangoPlaza': 'Plaza de Mango', 'F_OT_TrainingFacility': 'Training Facility Entrance', 'F_SVM_Peak': 'Cougar Mountain Peak Top', 'F_DT_Downtown': 'Downtown Streets'}
+
+
+def same_name(name):
+    """Key under which "The Dam", "Dam" and "dam" (or Slappy's/Slappys) match."""
+    return re.sub(r'^the ', '', re.sub(r"[^a-z0-9 ]", '', name.lower())).replace(' ', '')
+
+
+def city_extras(records):
+    """(locator, name) for the extra city spots present in records."""
+    out = [(k, v) for k, v in CITY_EXTRAS.items()]
+    for r in records:
+        n = r['locator']
+        if n.startswith('F_') and n.count('_') >= 2:
+            words = re.sub(r'(?<=[a-z])(?=[A-Z0-9])', ' ', n.split('_', 2)[2])
+            out.append((n, F_NAMES.get(n, words)))
+    return out
+
+
 # Readable names for the city teleports (retail names live in the FE database).
 CITY_NAMES = {
     'Z_OT01_CityHall': 'City Hall', 'Z_OT08_Cathedral': 'Cathedral', 'Z_OT14_CentralPlaza': 'Central Plaza',
@@ -415,6 +444,7 @@ def main():
     parser.add_argument('--sky', default='University', help='Installed sky copied for each location')
     parser.add_argument('--only', nargs='*', help='Location keys to import')
     parser.add_argument('--keep-cache', action='store_true', help='Keep the prepared city for faster re-imports')
+    parser.add_argument('--spots-only', action='store_true', help='Only refresh installed locations\' spot lists')
     ARGS = parser.parse_args()
     installation = ARGS.installation.expanduser()
     assets = installation / 'assets'
@@ -450,6 +480,9 @@ def main():
             continue
         start = by_name[spec.start]['matrix'][3][:3]
         text = dict(city_text, **strings(raw))
+        if ARGS.spots_only:
+            refresh_spots(target_root / spec.key, spec, by_name)
+            continue
 
         stage = Path(ARGS.work) / 'stage' / spec.key
         if stage.exists():
@@ -483,6 +516,12 @@ def main():
                     photo(photos / f'{stem}.rx2', stage / f'{stem}.png')
                     image = f'{stem}.png'
                 add(locator, CITY_NAMES.get(locator, locator), image=image)
+        if spec.stream == 'BAM':
+            names = {same_name(sp['name']) for sp in spots}
+            for locator, name in city_extras(records):
+                if locator in by_name and same_name(name) not in names:
+                    names.add(same_name(name))
+                    add(locator, name)
         if not spec.spots:
             for r in records:
                 name, description = challenge_text(r['locator'], text)
@@ -518,6 +557,30 @@ def main():
     refresh_receipt(installation)
     if not ARGS.keep_cache:
         shutil.rmtree(Path(ARGS.work) / 'convert', ignore_errors=True)
+
+
+def refresh_spots(folder, spec, by_name):
+    """Add the extra city spots to an installed location.json in place."""
+    path = folder / 'location.json'
+    if spec.stream != 'BAM' or not path.exists():
+        return
+    location = json.loads(path.read_text())
+    spots = location['destinations']
+    seen = {tuple(round(v) for v in s['matrix'][3][:3]) for s in spots}
+    names = {same_name(s['name']) for s in spots}
+    for locator, name in city_extras(list(by_name.values())):
+        r = by_name.get(locator)
+        if not r or same_name(name) in names:
+            continue
+        names.add(same_name(name))
+        where = tuple(round(v) for v in r['matrix'][3][:3])
+        if where in seen:
+            continue
+        seen.add(where)
+        spots.append(dict(id=re.sub(r'[^A-Za-z0-9_]+', '_', locator), name=name, matrix=r['matrix']))
+    location['destinations'] = spots[:1] + sorted(spots[1:], key=lambda s: s['name'].lower())
+    path.write_text(json.dumps(location, indent=1))
+    log(f'{spec.key}: {len(spots)} spots')
 
 
 def refresh_receipt(installation):

@@ -102,13 +102,13 @@ pub(crate) fn add_custom(data: &mut Option<MapData>, asset_root: &std::path::Pat
         let mut spots = Vec::new();
         for s in &l.destinations {
             let id = loc.spot_id(s);
-            data.entries.insert(id.clone(), Entry { title: s.name.clone(), image: None, description: s.description.clone(), position: None });
+            data.entries.insert(id.clone(), Entry { title: format!("{} - {}", l.title, s.name), image: None, description: s.description.clone(), position: None });
             if let Some(p) = s.image.as_ref().map(|i| assets.load(loc.asset(i))).or_else(|| photo.clone()) {
                 data.photos.insert(id.clone(), p);
             }
             spots.push(id);
         }
-        data.groups.push(Group { title: l.title.clone(), description: l.description.clone(), destinations: spots, local_only: true });
+        starts.extend(spots.into_iter().skip(1));
     }
     data.groups.push(Group { title: "Custom Spots".into(),
         description: "Maps imported from other games. Choosing one loads it.".into(), destinations: starts, local_only: false });
