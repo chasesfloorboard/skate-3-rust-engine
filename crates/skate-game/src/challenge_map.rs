@@ -33,6 +33,9 @@ pub(crate) struct Group {
     #[serde(default)]
     pub description: String,
     pub destinations: Vec<String>,
+    /// Listed only while one of its destinations is on the loaded map.
+    #[serde(default)]
+    pub local_only: bool,
 }
 
 pub(crate) struct MapData {
@@ -79,6 +82,36 @@ pub(crate) fn load(asset_root: &std::path::Path, assets: &AssetServer) -> Option
         entries: file.destinations,
         groups: file.groups,
     })
+}
+
+/// Imported locations (custom_locations.rs): a "Custom Locations" group with
+/// one row per location, plus each location's own spots while you are there.
+pub(crate) fn add_custom(data: &mut Option<MapData>, asset_root: &std::path::Path, assets: &AssetServer) {
+    let locations = crate::custom_locations::all(asset_root);
+    if locations.is_empty() { return; }
+    let data = data.get_or_insert_with(MapData::placeholder);
+    let mut starts = Vec::new();
+    for loc in &locations {
+        let l = &loc.location;
+        let photo = l.image.as_ref().map(|i| assets.load(loc.asset(i)));
+        let id = loc.start_id();
+        data.entries.insert(id.clone(), Entry { title: l.title.clone(), image: None,
+            description: Some(l.description.clone()).filter(|d| !d.is_empty()), position: None });
+        if let Some(p) = &photo { data.photos.insert(id.clone(), p.clone()); }
+        starts.push(id);
+        let mut spots = Vec::new();
+        for s in &l.destinations {
+            let id = loc.spot_id(s);
+            data.entries.insert(id.clone(), Entry { title: s.name.clone(), image: None, description: s.description.clone(), position: None });
+            if let Some(p) = s.image.as_ref().map(|i| assets.load(loc.asset(i))).or_else(|| photo.clone()) {
+                data.photos.insert(id.clone(), p);
+            }
+            spots.push(id);
+        }
+        data.groups.push(Group { title: l.title.clone(), description: l.description.clone(), destinations: spots, local_only: true });
+    }
+    data.groups.push(Group { title: "Custom Locations".into(),
+        description: "Maps imported from other games. Choosing one loads it.".into(), destinations: starts, local_only: false });
 }
 
 /// A row of the list panel, by list position.

@@ -32,6 +32,26 @@ pub(crate) fn load(assets: &Path) -> Result<Vec<Destination>, String> {
     Ok(catalog.destinations)
 }
 
+/// Retail destinations (when installed) plus imported custom locations: a
+/// row for each location (its start) followed by its spots.
+fn load_all(assets: &Path) -> Vec<Destination> {
+    let mut rows = load(assets).unwrap_or_else(|e| { bevy::log::warn!("Travel destinations: {e}"); vec![] });
+    let mut ids: std::collections::HashSet<String> = rows.iter().map(|d| d.id.clone()).collect();
+    for loc in crate::custom_locations::all(assets) {
+        let map = loc.map_name();
+        let start = (loc.start_id(), loc.location.title.clone(), loc.location.destinations[0].matrix);
+        let spots = loc.location.destinations.iter().map(|s| (loc.spot_id(s), s.name.clone(), s.matrix));
+        for (id, name, matrix) in std::iter::once(start).chain(spots) {
+            if name.is_empty() || !valid_matrix(matrix) || !ids.insert(id.clone()) {
+                bevy::log::warn!("Custom location {}: skipping spot {id}", loc.key);
+                continue;
+            }
+            rows.push(Destination { id, name, map: map.clone(), matrix: Some(matrix), unavailable_reason: None });
+        }
+    }
+    rows
+}
+
 fn valid_matrix(m: [[f32; 4]; 4]) -> bool {
     m.iter().flatten().all(|v| v.is_finite())
         && (0..3).all(|i| m[i][3].abs() < 1e-5)
@@ -139,6 +159,8 @@ impl Travel {
                 let rows: Vec<usize> = g.destinations.iter()
                     .filter_map(|id| self.rows.iter().position(|d| &d.id == id)).collect();
                 for &r in &rows { used[r] = true; }
+                // A custom location's own spots are listed only while you are there.
+                if g.local_only && !rows.iter().any(|&r| self.local[r]) { continue; }
                 if !rows.is_empty() {
                     groups.push(Group { title: g.title.clone(), description: g.description.clone(), rows });
                 }
@@ -207,7 +229,8 @@ fn interact(
         travel.generation = Some(map.generation); travel.open = false; travel.shown = false;
         for e in &roots { commands.entity(e).despawn(); }
         travel.map = crate::challenge_map::load(&config.asset_root, &assets);
-        let mut rows = load(&config.asset_root).unwrap_or_else(|e| { warn!("Travel destinations: {e}"); vec![] });
+        crate::challenge_map::add_custom(&mut travel.map, &config.asset_root, &assets);
+        let mut rows = load_all(&config.asset_root);
         rows.retain(|d| d.matrix.is_some());
         travel.local = rows.iter().map(|d| map.path.as_ref().is_some_and(|p| same_map(p, &d.map))).collect();
         travel.rows = rows;

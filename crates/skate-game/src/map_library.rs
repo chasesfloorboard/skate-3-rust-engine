@@ -23,6 +23,9 @@ pub(crate) fn discover(assets: &Path) -> Vec<Entry> {
             }
         }
     }
+    for loc in crate::custom_locations::all(assets) {
+        maps.push(Entry { label: loc.location.title.clone(), path: Some(loc.map_path.canonicalize().unwrap_or(loc.map_path)) });
+    }
     maps.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()));
     maps.insert(0, Entry { label: "Test world".into(), path: None });
     maps

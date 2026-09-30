@@ -8,6 +8,7 @@ mod pcm_audio;
 mod music;
 mod menu_skin;
 mod challenge_map;
+mod custom_locations;
 mod props;
 mod prop_material;
 mod day_cycle;
