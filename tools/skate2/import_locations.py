@@ -10,7 +10,11 @@ bare LIVE packages, or directories of them.
 
 Usage:
   python -m tools.skate2.import_locations --skate2 "~/Downloads/Skate 2" \
-      --dlc ~/Downloads --installation ~/Games/Skate3Rust/data/installations/<id> [--only S2Parkade]
+      --dlc ~/Downloads --installation ~/Games/Skate2Rust/data/installations/<id> [--only S2Parkade]
+
+~/Games/Skate2Rust is a copy of the game whose installation lists these maps as
+its "maps" receipt (setup.rs checks receipt sizes at startup); re-imports keep
+that receipt current.
 """
 from __future__ import annotations
 
@@ -508,8 +512,23 @@ def main():
         log(f'{spec.key}: installed with {len(spots)} spots')
         if spec.stream != 'BAM' and not ARGS.keep_cache:
             shutil.rmtree(Path(ARGS.work) / 'convert' / spec.key, ignore_errors=True)
+    refresh_receipt(installation)
     if not ARGS.keep_cache:
         shutil.rmtree(Path(ARGS.work) / 'convert', ignore_errors=True)
+
+
+def refresh_receipt(installation):
+    """Keep a Skate 2 copy's maps receipt matching the re-imported files."""
+    marker = installation.parent.parent / 'installation.json'
+    if not marker.exists():
+        return
+    data = json.loads(marker.read_text())
+    maps = data.get('outputs', {}).get('maps', {})
+    if not maps or not all(k.startswith('assets/private/custom-locations/') for k in maps):
+        return  # A Skate 3 installation: its receipt covers the retail districts.
+    data['outputs']['maps'] = {str(p.relative_to(installation)): {'size': p.stat().st_size}
+                               for p in sorted((installation / 'assets/private/custom-locations').glob('*/*.skate'))}
+    marker.write_text(json.dumps(data))
 
 
 if __name__ == '__main__':
