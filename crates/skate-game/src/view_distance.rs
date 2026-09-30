@@ -66,6 +66,9 @@ fn fog(
     menu: Res<crate::graphics_menu::Menu>,
     extent: Option<Res<WorldExtent>>,
     mut materials: ResMut<Assets<crate::retail_render::RetailWorldMaterial>>,
+    mut frame: ResMut<crate::retail_render::ShadowState>,
+    cameras: Query<(Entity, Option<&DistanceFog>), With<crate::camera::GameplayCamera>>,
+    mut commands: Commands,
     mut authored: Local<Option<(Vec4, Vec4)>>,
     mut applied: Local<Option<(Vec4, Vec4)>>,
 ) {
@@ -81,17 +84,39 @@ fn fog(
         // f = saturate(d * x + y): 0 at half the limit, 1 at the limit.
         (Vec4::new(2.0 / limit, -1.0, 1.0, 0.0), haze.extend(-1.0))
     });
-    let Some((_, first)) = materials.iter().next() else { return };
-    let current = (first.params.fog_ramp, first.params.fog_color);
-    // A map load (or the sky) rewrote the fog: that is the new authored value.
-    if *applied != Some(current) { *authored = Some(current); *applied = None; }
-    let wanted = match target { Some(t) => t, None if applied.is_some() => authored.unwrap_or(current), None => return };
-    if wanted == current { *applied = target; return; }
-    // Only re-send on meaningful change (the haze drifts slowly with the hour).
-    if target.is_some() && applied.is_some_and(|(r, c)| r == wanted.0 && c.distance(wanted.1) < 0.002) { return; }
-    for (_, material) in materials.iter_mut() {
-        material.params.fog_ramp = wanted.0;
-        material.params.fog_color = wanted.1;
+    // Any material not showing what it should is fixed: new ones (a map load,
+    // late foliage) carry the authored fog, which is remembered for Off.
+    let stale: Vec<_> = materials.iter().filter_map(|(id, m)| {
+        let have = (m.params.fog_ramp, m.params.fog_color);
+        if applied.is_none_or(|a| a != have) && target.is_none_or(|t| t != have) { *authored = Some(have); }
+        let want = target.or(*authored).unwrap_or(have);
+        (have != want && (target.is_some() || applied.is_some_and(|a| a == have))).then_some((id, have, want))
+    }).collect();
+    // The haze drifts with the hour: materials already fogged skip tiny colour changes.
+    let drift = target.zip(*applied).is_some_and(|(t, a)| t.0 == a.0 && t.1.distance(a.1) < 0.002);
+    for (id, have, want) in stale {
+        if drift && Some(have) == *applied { continue; }
+        if let Some(m) = materials.get_mut(id) { m.params.fog_ramp = want.0; m.params.fog_color = want.1; }
     }
-    *applied = target;
+    if !drift { *applied = target; }
+    // Standard-material meshes (unconverted parts, props before adoption) take
+    // Bevy's own fog: same start and end, same haze at the world's exposure.
+    for (camera, fog) in &cameras {
+        match (limit, target, fog) {
+            (Some(limit), Some((_, haze)), _) => {
+                let wanted = DistanceFog {
+                    color: Color::linear_rgb(haze.x * 2.5, haze.y * 2.5, haze.z * 2.5),
+                    falloff: FogFalloff::Linear { start: limit * 0.5, end: limit },
+                    ..default()
+                };
+                if fog.is_none_or(|f| f.color != wanted.color || !matches!(f.falloff, FogFalloff::Linear { end, .. } if end == limit)) {
+                    commands.entity(camera).insert(wanted);
+                }
+            }
+            (_, _, Some(_)) => { commands.entity(camera).remove::<DistanceFog>(); }
+            _ => {}
+        }
+    }
+    let shown = target.or(*authored);
+    if let Some(f) = shown && frame.5 != [f.0, f.1] { frame.5 = [f.0, f.1]; }
 }

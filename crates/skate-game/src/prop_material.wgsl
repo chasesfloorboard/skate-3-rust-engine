@@ -7,7 +7,7 @@
 #import bevy_pbr::shadows::fetch_directional_shadow
 #import skate_dynamic_lights::{lamp_light, lamp_share}
 
-struct FrameState { shadow: vec4<f32>, clock: vec4<f32>, pca: array<vec4<f32>, 7>, sun: vec4<f32>, sh: array<vec4<f32>, 9> }
+struct FrameState { shadow: vec4<f32>, clock: vec4<f32>, pca: array<vec4<f32>, 7>, sun: vec4<f32>, sh: array<vec4<f32>, 9>, fog: array<vec4<f32>, 2> }
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> params: vec4<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(1) var diffuse: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(2) var diffuse_sampler: sampler;
@@ -63,9 +63,20 @@ fn fragment(i: VertexOutput) -> @location(0) vec4<f32> {
         // Dark albedos (Metal Mario's) keep a silver body under the reflection.
         let silver = vec3<f32>(0.42 * (1.0 - dot(d, vec3<f32>(0.333))));
         let base = (d * 0.6 + silver * 2.5) * lit + metal;
-        return vec4<f32>(base + lamp * 2.5, select(a.a, 1.0 - lamp_share(base, lamp * 2.5), a.a >= 1.0 && shine.y < 0.5));
+        return fogged(vec4<f32>(base + lamp * 2.5, select(a.a, 1.0 - lamp_share(base, lamp * 2.5), a.a >= 1.0 && shine.y < 0.5)), i.world_position.xyz);
     }
     // Opaque texels carry 1 - lamp share in alpha for the tone pass (blended
     // ones, shine.y, keep their real alpha).
-    return vec4<f32>((d * lit + lamp) * 2.5, select(a.a, 1.0 - lamp_share(d * lit, lamp), a.a >= 1.0 && shine.y < 0.5));
+    return fogged(vec4<f32>((d * lit + lamp) * 2.5, select(a.a, 1.0 - lamp_share(d * lit, lamp), a.a >= 1.0 && shine.y < 0.5)), i.world_position.xyz);
+}
+
+// The world's fog (retail_world.wgsl), so props fade with the buildings; past
+// a fully fogged distance (the Distance fog cutoff) they are not drawn at all.
+fn fogged(c: vec4<f32>, p: vec3<f32>) -> vec4<f32> {
+    let ramp = frame.fog[0];
+    let colour = frame.fog[1];
+    var f = saturate(length(p - view_bindings::view.world_position) * ramp.x + ramp.y);
+    if ramp.z != 1.0 && ramp.z > 0.0 { f = pow(max(f, 1e-6), ramp.z); }
+    if ramp.x > 0.0 && f >= 0.999 { discard; }
+    return vec4<f32>(c.rgb * (1.0 + colour.a * f) + colour.rgb * f * 2.5, c.a);
 }

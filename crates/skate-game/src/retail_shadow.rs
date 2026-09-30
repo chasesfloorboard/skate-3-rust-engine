@@ -16,8 +16,9 @@ pub(super) const BUFFER: Handle<ShaderStorageBuffer> =
 
 #[derive(Resource, Clone, Default, ExtractResource)]
 /// (shadow floor, clock: x time / y ocean / z night / w dusk, ocean PCA,
-/// sun direction: w=1 when set, skater probe lighting SH for dynamic props)
-pub(crate) struct ShadowState(pub Vec4, pub Vec4, pub [Vec4; 7], pub Vec4, pub [Vec4; 9]);
+/// sun direction: w=1 when set, skater probe lighting SH for dynamic props,
+/// the world's current fog ramp and colour for props)
+pub(crate) struct ShadowState(pub Vec4, pub Vec4, pub [Vec4; 7], pub Vec4, pub [Vec4; 9], pub [Vec4; 2]);
 
 impl ShadowState {
     pub(crate) fn approach(&mut self, target: Vec3, dt: f32) {
@@ -46,7 +47,7 @@ pub(super) fn install(app: &mut App) {
 }
 
 fn initialize(mut buffers: ResMut<Assets<ShaderStorageBuffer>>) {
-    let mut buffer = ShaderStorageBuffer::from([Vec4::ZERO; 19]);
+    let mut buffer = ShaderStorageBuffer::from([Vec4::ZERO; 21]);
     buffer.buffer_description.usage |= BufferUsages::COPY_DST;
     buffers
         .insert(BUFFER.id(), buffer)
@@ -64,13 +65,14 @@ fn upload(
             .chain(state.2)
             .chain([state.3])
             .chain(state.4)
+            .chain(state.5)
             .flat_map(|v| v.to_array())
             .flat_map(f32::to_le_bytes);
-        let mut bytes = [0u8; 304];
+        let mut bytes = [0u8; 336];
         for (destination, value) in bytes.iter_mut().zip(values) {
             *destination = value;
         }
-        // Keep the buffer and all material bind groups alive; upload 304 frame bytes.
+        // Keep the buffer and all material bind groups alive; upload 336 frame bytes.
         queue.write_buffer(&buffer.buffer, 0, &bytes);
     }
 }

@@ -447,7 +447,7 @@ mod tests {
         });
         world.insert_resource(crate::retail_render::RetailScene(false));
         world.init_resource::<Assets<crate::customiser_material::SkaterMaterial>>();
-        world.insert_resource(crate::retail_render::ShadowState(Vec4::ONE, Vec4::ONE, [Vec4::ONE; 7], Vec4::ZERO, [Vec4::ZERO; 9]));
+        world.insert_resource(crate::retail_render::ShadowState(Vec4::ONE, Vec4::ONE, [Vec4::ONE; 7], Vec4::ZERO, [Vec4::ZERO; 9], [Vec4::ZERO; 2]));
         let material = Handle::<StandardMaterial>::default();
         let player = world.spawn((
             OriginalCharacterMaterial { material: material.clone(), layers: None },
