@@ -154,6 +154,9 @@ mod gamepad {
             .as_ref()
     }
 
+    /// Valve: Steam Input's virtual gamepads.
+    const STEAM_VENDOR: u16 = 0x28de;
+
     fn axis_i16(value: f32) -> i16 {
         (value.clamp(-1.0, 1.0) * i16::MAX as f32) as i16
     }
@@ -175,12 +178,17 @@ mod gamepad {
         // or hat axes (e.g. a keyboard's "System Control" interface, which it
         // reports with a Driver mapping); require a left stick and a face
         // button so those cannot claim slot 0 ahead of a real pad.
-        let Some((id, _)) = gilrs
+        let pads: Vec<_> = gilrs
             .gamepads()
             .filter(|(_, pad)| {
                 pad.axis_code(Axis::LeftStickX).is_some() && pad.button_code(Button::South).is_some()
             })
-            .nth(index as usize)
+            .map(|(id, pad)| (id, pad.vendor_id() == Some(STEAM_VENDOR)))
+            .collect();
+        // With Steam Input on, Steam grabs the real pad (it goes silent) and
+        // offers a virtual one (Valve's vendor id) per controller: use those.
+        let steam = pads.iter().any(|(_, virtual_pad)| *virtual_pad);
+        let Some((id, _)) = pads.into_iter().filter(|(_, virtual_pad)| *virtual_pad || !steam).nth(index as usize)
         else {
             return Err(DeviceError::Disconnected);
         };

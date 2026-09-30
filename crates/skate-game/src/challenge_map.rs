@@ -67,6 +67,8 @@ impl MapData {
 }
 
 pub(crate) fn load(asset_root: &std::path::Path, assets: &AssetServer) -> Option<MapData> {
+    // The retail challenge map is Port Carverton's.
+    if !crate::editions::current().shows(Some(crate::editions::Game::Skate3)) { return None; }
     let bytes = std::fs::read(asset_root.join(DIRECTORY).join("map.json")).ok()?;
     let file: MapFile = serde_json::from_slice(&bytes)
         .map_err(|e| warn!("Challenge map disabled: {e}"))

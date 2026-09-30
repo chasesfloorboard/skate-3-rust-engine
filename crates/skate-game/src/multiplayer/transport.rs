@@ -105,8 +105,12 @@ impl Steam {
             .parent()
             .unwrap()
             .to_path_buf();
-        let helper = dir.join("steam-relay/skate-steam-relay.exe");
-        if !helper.is_file() || !dir.join("steam-relay/steam_api64.dll").is_file() {
+        #[cfg(windows)]
+        let (helper_name, library) = ("skate-steam-relay.exe", "steam_api64.dll");
+        #[cfg(not(windows))]
+        let (helper_name, library) = ("skate-steam-relay", "libsteam_api.so");
+        let helper = dir.join("steam-relay").join(helper_name);
+        if !helper.is_file() || !dir.join("steam-relay").join(library).is_file() {
             return Err(
                 "Steam relay files missing; solo and direct multiplayer remain available".into(),
             );
@@ -128,6 +132,9 @@ impl Steam {
             use std::os::windows::process::CommandExt;
             command.creation_flags(0x08000000);
         }
+        // The relay loads libsteam_api.so from its own folder.
+        #[cfg(not(windows))]
+        command.env("LD_LIBRARY_PATH", dir.join("steam-relay"));
         let child = command
             .spawn()
             .map_err(|e| format!("Could not start Steam relay: {e}"))?;

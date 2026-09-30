@@ -7,7 +7,7 @@ use bevy::{asset::RenderAssetUsages, prelude::*, render::render_resource::{Exten
 use std::{io::Read, path::PathBuf, process::{Child, Command, Stdio}, sync::mpsc, time::Instant};
 
 /// (file stem, menu title) in the order the menu lists them.
-pub(crate) const MOVIES: [(&str, &str); 11] = [
+const SKATE3: [(&str, &str); 11] = [
     ("intro_movie", "Story intro"),
     ("Coach_frank_intro", "Coach Frank"),
     ("skate_park", "skate.Park"),
@@ -20,6 +20,74 @@ pub(crate) const MOVIES: [(&str, &str); 11] = [
     ("cameraHigh", "Camera: high"),
     ("cameraLow", "Camera: low"),
 ];
+/// Skate 2's disc movies (prepared into private/skate2/movies).
+const SKATE2: [(&str, &str); 40] = [
+    ("intro_movie", "Story intro"),
+    ("Skate2_EA_Intro", "EA intro"),
+    ("Blackbox_bumper", "EA Black Box"),
+    ("RedaCarRide", "Reda's car ride"),
+    ("Service_BB01", "Big Black"),
+    ("Service_Drain01", "Service: drain"),
+    ("Service_DrainDam01", "Service: drain dam"),
+    ("Service_Uncap01", "Service: uncapped"),
+    ("HOM", "Hall of Meat"),
+    ("Unlock_DannyMegaPark", "Unlock: Danny Way's Mega Park"),
+    ("Unlock_GVR", "Unlock: GVR"),
+    ("Unlock_KingOfMountain", "Unlock: King of the Mountain"),
+    ("Unlock_PublicSkatePark", "Unlock: Public skatepark"),
+    ("Unlock_Stadium", "Unlock: Stadium"),
+    ("Unlock_TopOfDam", "Unlock: Top of the dam"),
+    ("Tutorial_Skate01", "Tutorial 1"),
+    ("Tutorial_Skate02", "Tutorial 2"),
+    ("Tutorial_Skate03", "Tutorial 3"),
+    ("Tutorial_Skate04", "Tutorial 4"),
+    ("Tutorial_Skate05", "Tutorial 5"),
+    ("Tutorial_Skate06", "Tutorial 6"),
+    ("Tutorial_Map", "Tutorial: map"),
+    ("Tutorial_CreateASpot", "Tutorial: create a spot"),
+    ("Tutorial_BasicReplay", "Tutorial: replay editor"),
+    ("SponsorTraining01", "Sponsor training 1"),
+    ("SponsorTraining02", "Sponsor training 2"),
+    ("SponsorTraining03", "Sponsor training 3"),
+    ("SponsorTraining04", "Sponsor training 4"),
+    ("SponsorTraining05", "Sponsor training 5"),
+    ("SponsorTraining06", "Sponsor training 6"),
+    ("SponsorTraining07", "Sponsor training 7"),
+    ("SponsorTraining08", "Sponsor training 8"),
+    ("SponsorTraining09", "Sponsor training 9"),
+    ("SponsorTraining10", "Sponsor training 10"),
+    ("SponsorTraining11", "Sponsor training 11"),
+    ("SponsorTraining12", "Sponsor training 12"),
+    ("SponsorTraining13", "Sponsor training 13"),
+    ("SponsorTraining14", "Sponsor training 14"),
+    ("Credits", "Credits"),
+    ("Attract", "Attract loop"),
+];
+
+/// A movie of the running edition: (file stem, menu title, source game).
+#[derive(Clone)]
+pub(crate) struct Movie { pub name: &'static str, pub title: String, skate2: bool }
+
+/// Movies for the pause menu. Freeskate lists both games' movies.
+pub(crate) fn list() -> Vec<Movie> {
+    use crate::editions::{current, Game};
+    let edition = current();
+    let mut movies = Vec::new();
+    if edition.shows(Some(Game::Skate3)) {
+        movies.extend(SKATE3.iter().map(|&(name, title)| Movie { name, title: title.into(), skate2: false }));
+    }
+    if edition.shows(Some(Game::Skate2)) {
+        let suffix = edition == crate::editions::Edition::Freeskate;
+        movies.extend(SKATE2.iter().map(|&(name, title)| Movie { name,
+            title: if suffix { format!("{title} (Skate 2)") } else { title.into() }, skate2: true }));
+    }
+    movies
+}
+impl Movie {
+    /// Identifier the menu queues: Skate 2 movies carry a "skate2/" prefix.
+    pub fn id(&self) -> String { if self.skate2 { format!("skate2/{}", self.name) } else { self.name.into() } }
+}
+
 const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 720;
 const FPS: f32 = 29.97;
@@ -54,23 +122,32 @@ impl Drop for Playback {
     }
 }
 
-fn directory(config: &crate::config::Config) -> PathBuf {
-    config.asset_root.join("private/movies")
+/// Asset path (under the asset root, without extension) of a queued movie id.
+fn asset(id: &str) -> String {
+    match id.strip_prefix("skate2/") {
+        Some(name) => format!("private/skate2/movies/{name}"),
+        None => format!("private/movies/{id}"),
+    }
 }
-fn seen_path(config: &crate::config::Config) -> PathBuf {
-    config.asset_root.parent().unwrap_or(&config.asset_root).join("settings/movies-seen")
+fn seen_path(config: &crate::config::Config, skate2: bool) -> PathBuf {
+    let settings = config.asset_root.parent().unwrap_or(&config.asset_root).join("settings");
+    settings.join(if skate2 { "movies-seen-skate2" } else { "movies-seen" })
 }
 
-/// Start-up: the EA logo, then the story intro once per installation.
+/// Start-up: the EA logo, then the story intro once per installation, from
+/// the running edition's disc (Freeskate plays Skate 3's).
 fn boot(mut player: ResMut<Player>, config: Res<crate::config::Config>) {
     // Test hook: SKATE_DEBUG_MOVIE=<name> plays that movie, even under verification.
     if let Ok(name) = std::env::var("SKATE_DEBUG_MOVIE") { player.queue.push_back(name); return; }
     if std::env::var_os("SKATE_VERIFY_DELAY").is_some() || std::env::var_os("SKATE_PERF_REPORT").is_some() { return; }
-    if !directory(&config).join("EA_Blackbox.vp6").is_file() { return; }
-    player.queue.push_back("EA_Blackbox".into());
-    if !seen_path(&config).is_file() {
-        player.queue.push_back("intro_movie".into());
-        let _ = std::fs::write(seen_path(&config), b"intro\n");
+    let skate2 = crate::editions::current() == crate::editions::Edition::Skate2;
+    let (logos, intro): (&[&str], _) = if skate2 { (&["skate2/Skate2_EA_Intro", "skate2/Blackbox_bumper"], "skate2/intro_movie") }
+        else { (&["EA_Blackbox"], "intro_movie") };
+    if !config.asset_root.join(format!("{}.vp6", asset(logos[0]))).is_file() { return; }
+    player.queue.extend(logos.iter().map(|&logo| logo.to_owned()));
+    if !seen_path(&config, skate2).is_file() {
+        player.queue.push_back(intro.into());
+        let _ = std::fs::write(seen_path(&config, skate2), b"intro\n");
     }
 }
 
@@ -118,7 +195,7 @@ fn play(
         return;
     }
     let Some(name) = player.queue.pop_front() else { return };
-    let video = directory(&config).join(format!("{name}.vp6"));
+    let video = config.asset_root.join(format!("{}.vp6", asset(&name)));
     if !video.is_file() { return; }
     let child = Command::new("ffmpeg")
         .args(["-v", "error", "-i"]).arg(&video)
@@ -151,9 +228,9 @@ fn play(
     )).with_children(|screen| {
         screen.spawn((ImageNode::new(image.clone()), Node { width: percent(100), aspect_ratio: Some(16.0 / 9.0), max_height: percent(100), ..default() }));
     }).id();
-    let soundtrack = directory(&config).join(format!("{name}.ogg"));
+    let soundtrack = config.asset_root.join(format!("{}.ogg", asset(&name)));
     let audio = soundtrack.is_file().then(|| commands.spawn((
-        AudioPlayer::new(assets.load::<AudioSource>(format!("private/movies/{name}.ogg"))),
+        AudioPlayer::new(assets.load::<AudioSource>(format!("{}.ogg", asset(&name)))),
         PlaybackSettings::DESPAWN,
     )).id());
     let resume = !time.is_paused();

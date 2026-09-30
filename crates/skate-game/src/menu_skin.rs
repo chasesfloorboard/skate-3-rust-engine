@@ -11,13 +11,13 @@ const SELECTED_SIZE: f32 = 32.0;
 const DESCRIPTION_SIZE: f32 = 20.0;
 const BREADCRUMB_SIZE: f32 = 30.0;
 /// Retail pause-menu colours: cyan selection, slate idle items.
-const SELECTED: Color = Color::srgb(0.55, 0.85, 1.0);
-const IDLE: Color = Color::srgb(0.52, 0.62, 0.76);
-const DESCRIPTION: Color = Color::srgb(0.40, 0.72, 0.98);
-const BREADCRUMB: Color = Color::srgb(0.86, 0.86, 0.84);
+pub(crate) const SELECTED: Color = Color::srgb(0.55, 0.85, 1.0);
+pub(crate) const IDLE: Color = Color::srgb(0.52, 0.62, 0.76);
+pub(crate) const DESCRIPTION: Color = Color::srgb(0.40, 0.72, 0.98);
+pub(crate) const BREADCRUMB: Color = Color::srgb(0.86, 0.86, 0.84);
 const GLOW: Color = Color::srgba(0.16, 0.55, 1.0, 0.16);
 /// Tint of the Futura Glow halo behind selected text.
-const TEXT_GLOW: Color = Color::srgba(0.30, 0.68, 1.0, 0.95);
+pub(crate) const TEXT_GLOW: Color = Color::srgba(0.30, 0.68, 1.0, 0.95);
 /// Solid backing under the icon tiles; it shows through their cut-out
 /// symbols (muted slate idle, near white selected, as on the retail menu).
 const TILE: Color = Color::srgb(0.47, 0.56, 0.66);
@@ -113,8 +113,13 @@ pub(crate) struct Breadcrumb;
 #[derive(Component)]
 pub(crate) struct TabIcon(usize);
 
-pub(crate) fn load(mut commands: Commands, config: Res<crate::config::Config>, assets: Res<AssetServer>) {
-    let path = config.asset_root.join(DIRECTORY).join("font.json");
+/// Asset root for apps without a game Config (the edition picker).
+#[derive(Resource)]
+pub(crate) struct SkinRoot(pub std::path::PathBuf);
+
+pub(crate) fn load(mut commands: Commands, config: Option<Res<crate::config::Config>>, root: Option<Res<SkinRoot>>, assets: Res<AssetServer>) {
+    let Some(asset_root) = config.map(|c| c.asset_root.clone()).or_else(|| root.map(|r| r.0.clone())) else { return };
+    let path = asset_root.join(DIRECTORY).join("font.json");
     let Ok(bytes) = std::fs::read(&path) else { return };
     let font: FontFile = match serde_json::from_slice(&bytes) {
         Ok(font) => font,
@@ -127,7 +132,7 @@ pub(crate) fn load(mut commands: Commands, config: Res<crate::config::Config>, a
         atlas: assets.load(format!("{DIRECTORY}/{}", font.atlas)),
         glow: font.glow.map(|g| (assets.load(format!("{DIRECTORY}/{}", g.atlas)), g.characters)),
         pill: assets.load(format!("{DIRECTORY}/pill.png")),
-        icons: std::fs::read_dir(config.asset_root.join(DIRECTORY).join("icons")).into_iter().flatten()
+        icons: std::fs::read_dir(asset_root.join(DIRECTORY).join("icons")).into_iter().flatten()
             .filter_map(|e| e.ok()?.path().file_stem()?.to_str().map(str::to_owned))
             .map(|name| { let handle = assets.load(format!("{DIRECTORY}/icons/{name}.png")); (name, handle) })
             .collect(),

@@ -42,6 +42,7 @@ fi
 
 echo "== Game"
 cargo build --release --locked --target-dir "$target" -p skate-game --bin skate3rust --no-default-features
+cargo build --release --locked --target-dir "$target" -p skate-steam-relay --bin skate-steam-relay
 rustc --edition 2024 --crate-type cdylib -C opt-level=3 -C panic=abort \
     tools/asset_pipeline/refpack_native.rs -o "$target/native/refpack.so"
 
@@ -104,6 +105,11 @@ chmod 755 "$stage/support/vgmstream-cli"
 
 echo "== Package"
 strip -o "$stage/skate3rust" "$target/release/skate3rust"
+# Steam multiplayer helper (Spacewar app 480) and Steam's redistributable library.
+mkdir -p "$stage/steam-relay"
+strip -o "$stage/steam-relay/skate-steam-relay" "$target/release/skate-steam-relay"
+steam_lib=$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -path '*steamworks-sys-*/redistributable_bin/linux64/libsteam_api.so' | head -1)
+install -m 755 "$steam_lib" "$stage/steam-relay/libsteam_api.so"
 install -m 755 scripts/linux-package/Play.sh scripts/linux-package/Install-Shortcut.sh "$stage/"
 cp mods/native-trainer.zip mods/mario-kart.zip mods/README.md "$stage/mods/"
 cp README.md docs/THIRD_PARTY_NOTICES.md scripts/linux-package/README-LINUX.md "$stage/"

@@ -1,4 +1,6 @@
 mod fps_overlay;
+mod editions;
+mod edition_picker;
 mod street_lights;
 mod arm_ik;
 mod dropper;
@@ -75,6 +77,11 @@ fn main() -> bevy::app::AppExit {
         Ok(guard) => guard,
         Err(error) => { eprintln!("{error}"); return bevy::app::AppExit::error(); }
     };
+    match edition_picker::resolve() {
+        Ok(edition_picker::Outcome::Run(edition)) => editions::set(edition),
+        Ok(edition_picker::Outcome::Exit) => return bevy::app::AppExit::Success,
+        Err(error) => { eprintln!("{error}"); return bevy::app::AppExit::error(); }
+    }
     let _startup = bevy::log::info_span!("startup").entered();
     eprintln!("REPORT_META stage=configuration_and_installation");
     let config = match bevy::log::info_span!("load_configuration_and_map").in_scope(config::Config::from_env) {

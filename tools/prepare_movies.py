@@ -6,7 +6,7 @@ and its English soundtrack (interleaved EA SCHl 5.1 audio, which ffmpeg does
 not read; vgmstream does) mixed to stereo Ogg Vorbis beside it.
 
 Usage:
-  python tools/prepare_movies.py GAME_ROOT INSTALLATION_DIR VGMSTREAM
+  python tools/prepare_movies.py GAME_ROOT INSTALLATION_DIR VGMSTREAM [--output-dir skate2/movies]
 """
 import argparse
 import shutil
@@ -15,9 +15,10 @@ import tempfile
 from pathlib import Path
 
 
-def prepare_movies(game_root, installation, ffmpeg, vgmstream, report=print, env=None):
+def prepare_movies(game_root, installation, ffmpeg, vgmstream, report=print, env=None, output_dir='movies'):
+    """output_dir is under assets/private: Skate 2's movies go to skate2/movies."""
     source = Path(game_root) / 'data/movies'
-    output = Path(installation) / 'assets/private/movies'
+    output = Path(installation) / 'assets/private' / output_dir
     output.mkdir(parents=True, exist_ok=True)
     count = 0
     for movie in sorted(source.glob('*_english_ntsc.vp6')):
@@ -44,8 +45,10 @@ def main():
     parser.add_argument('game_root', type=Path)
     parser.add_argument('installation', type=Path)
     parser.add_argument('vgmstream', type=Path)
+    parser.add_argument('--output-dir', default='movies')
     args = parser.parse_args()
-    prepare_movies(args.game_root, args.installation, shutil.which('ffmpeg') or 'ffmpeg', args.vgmstream)
+    prepare_movies(args.game_root, args.installation, shutil.which('ffmpeg') or 'ffmpeg', args.vgmstream,
+                   output_dir=args.output_dir)
 
 
 if __name__ == '__main__':

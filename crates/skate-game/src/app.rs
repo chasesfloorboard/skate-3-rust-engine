@@ -50,7 +50,11 @@ pub(crate) fn build(
             })
             .set(WindowPlugin {
                 primary_window: Some(Window {
-                    title: config.multiplayer.title.clone().unwrap_or_else(||"Skate 3 Rust Engine".into()),
+                    title: config.multiplayer.title.clone().unwrap_or_else(|| match crate::editions::current() {
+                        // Development runs keep the engine's name.
+                        crate::editions::Edition::Freeskate if std::env::args_os().all(|a| a != "--edition") => "Skate 3 Rust Engine".into(),
+                        edition => edition.window_title().into(),
+                    }),
                     resolution: (1280, 800).into(),
                     ..default()
                 }),

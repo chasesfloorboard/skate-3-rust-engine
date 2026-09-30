@@ -529,7 +529,7 @@ def main():
                     add(r['locator'], name, description)
         spots = spots[:1] + sorted(spots[1:], key=lambda s: s['name'].lower())
 
-        location = dict(version=1, title=spec.title, description=spec.description, map=f'{spec.key}.skate', destinations=spots)
+        location = dict(version=1, game='skate2', title=spec.title, description=spec.description, map=f'{spec.key}.skate', destinations=spots)
         if spec.photo and (photos / f'{spec.photo}.rx2').exists():
             photo(photos / f'{spec.photo}.rx2', stage / 'preview.png')
             location['image'] = 'preview.png'

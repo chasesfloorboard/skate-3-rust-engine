@@ -69,6 +69,7 @@ impl Config {
                     explicit_map = true;
                 }
                 Some("--test-world") => { explicit_map = true; config.map = None; config.map_path = None; }
+                Some("--edition") => { args.next().ok_or("--edition requires skate2, skate3 or freeskate")?; }
                 Some("--check-assets") => config.check_assets = true,
                 Some("--start-paused") => config.start_paused = true,
                 Some("--teleport") => config.teleport = Some(args.next().ok_or("--teleport requires a destination ID")?.to_string_lossy().into_owned()),

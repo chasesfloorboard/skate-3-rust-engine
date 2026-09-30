@@ -10,7 +10,9 @@ pub(crate) struct Entry {
 pub(crate) fn discover(assets: &Path) -> Vec<Entry> {
     let mut maps = Vec::new();
     let root = assets.parent().unwrap_or(assets).join("maps");
-    for directory in [&root, &root.join("private")] {
+    // Maps converted from the setup disc are Skate 3's.
+    let retail = crate::editions::current().shows(Some(crate::editions::Game::Skate3));
+    for directory in [&root, &root.join("private")].into_iter().filter(|_| retail) {
         if let Ok(entries) = std::fs::read_dir(directory) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -34,9 +36,13 @@ pub(crate) fn discover(assets: &Path) -> Vec<Entry> {
 pub(crate) fn default_map(assets: &Path) -> Result<Option<PathBuf>, String> {
     // Only a completed release installation creates this pointer. Existing
     // development checkouts continue to boot the test world.
-    let pointer = assets.parent().unwrap_or(assets).join("settings/default-map.json");
+    let settings = assets.parent().unwrap_or(assets).join("settings");
+    let edition = crate::editions::current();
+    let pointer = settings.join(crate::editions::default_map_file(edition));
     let bytes = match std::fs::read(&pointer) {
         Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && edition != crate::editions::Edition::Freeskate
+            && settings.join("default-map.json").is_file() => return Ok(first_map(assets)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(format!("{}: {e}", pointer.display())),
     };
@@ -49,6 +55,15 @@ pub(crate) fn default_map(assets: &Path) -> Result<Option<PathBuf>, String> {
     Ok(Some(assets.parent().unwrap_or(assets).join(relative)))
 }
 
+/// An edition's first launch: its home map (the Skate 2 city, Skate 3's
+/// University) or else its first map.
+fn first_map(assets: &Path) -> Option<PathBuf> {
+    let maps: Vec<PathBuf> = discover(assets).into_iter().filter_map(|e| e.path).collect();
+    ["S2SanVanelona", "University"].iter()
+        .find_map(|home| maps.iter().find(|p| p.file_stem().is_some_and(|s| s == *home)))
+        .or_else(|| maps.first()).cloned()
+}
+
 /// Save only a successfully activated map. Null explicitly selects the test world.
 pub(crate) fn save_default(assets: &Path, map: Option<&Path>) -> Result<(), String> {
     let root = assets.parent().unwrap_or(assets);
@@ -57,10 +72,11 @@ pub(crate) fn save_default(assets: &Path, map: Option<&Path>) -> Result<(), Stri
         .map_err(|_| "Map is outside this installation; default map unchanged".to_string())).transpose()?;
     let directory = root.join("settings");
     std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
-    let temporary = directory.join("default-map.json.tmp");
+    let file = crate::editions::default_map_file(crate::editions::current());
+    let temporary = directory.join(format!("{file}.tmp"));
     std::fs::write(&temporary, serde_json::to_vec_pretty(&relative).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
-    std::fs::rename(temporary, directory.join("default-map.json")).map_err(|e| e.to_string())
+    std::fs::rename(temporary, directory.join(file)).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

@@ -30,6 +30,9 @@ pub(crate) struct Location {
     pub image: Option<String>,
     /// The first spot is where the location starts.
     pub destinations: Vec<Spot>,
+    /// Source disc ("skate2"/"skate3"); locations without one are Freeskate only.
+    #[serde(default)]
+    game: Option<crate::editions::Game>,
 }
 
 pub(crate) struct Loaded {
@@ -46,6 +49,10 @@ impl Loaded {
     pub fn map_name(&self) -> String {
         self.map_path.file_stem().unwrap_or_default().to_string_lossy().into_owned()
     }
+    /// Source disc. Imports made before the field existed are Skate 2's (S2 keys).
+    pub fn game(&self) -> Option<crate::editions::Game> {
+        self.location.game.or_else(|| self.key.starts_with("S2").then_some(crate::editions::Game::Skate2))
+    }
     /// Asset path of a photo in this location's directory.
     pub fn asset(&self, file: &str) -> String { format!("{DIRECTORY}/{}/{file}", self.key) }
 }
@@ -54,7 +61,14 @@ fn plain(name: &str) -> bool {
     !name.is_empty() && !name.contains(['/', '\\', ':']) && !matches!(name, "." | "..")
 }
 
+/// Locations belonging to the running edition.
 pub(crate) fn all(assets: &Path) -> Vec<Loaded> {
+    let edition = crate::editions::current();
+    scan(assets).into_iter().filter(|l| edition.shows(l.game())).collect()
+}
+
+/// Every installed location, whatever the edition.
+pub(crate) fn scan(assets: &Path) -> Vec<Loaded> {
     let mut result = Vec::new();
     let Ok(entries) = std::fs::read_dir(assets.join(DIRECTORY)) else { return result };
     for entry in entries.flatten() {
