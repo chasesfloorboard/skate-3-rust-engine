@@ -110,7 +110,7 @@ pub(crate) fn add_custom(data: &mut Option<MapData>, asset_root: &std::path::Pat
         }
         data.groups.push(Group { title: l.title.clone(), description: l.description.clone(), destinations: spots, local_only: true });
     }
-    data.groups.push(Group { title: "Custom Locations".into(),
+    data.groups.push(Group { title: "Custom Spots".into(),
         description: "Maps imported from other games. Choosing one loads it.".into(), destinations: starts, local_only: false });
 }
 

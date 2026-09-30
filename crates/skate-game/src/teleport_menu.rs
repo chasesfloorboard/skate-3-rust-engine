@@ -90,6 +90,8 @@ struct Group {
 #[derive(Resource, Default)]
 pub(crate) struct Travel {
     pub open: bool,
+    /// Open straight onto the Custom Spots list.
+    pub custom: bool,
     pub closed_this_frame: bool,
     shown: bool,
     rows: Vec<Destination>,
@@ -274,6 +276,9 @@ fn interact(
         // Opening: start on the district you are in, like the retail list.
         let here = travel.groups.iter().position(|g| g.rows.iter().any(|&r| travel.local[r])).unwrap_or(0);
         travel.show_level(0, 0, here);
+        if std::mem::take(&mut travel.custom) && let Some(g) = travel.groups.iter().position(|g| g.title == "Custom Spots") {
+            travel.show_level(1, g, 0);
+        }
         if std::env::var("SKATE_VERIFY_TRAVEL").as_deref() == Ok("2") {
             travel.show_level(1, here, 0);
         }

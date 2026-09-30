@@ -58,6 +58,8 @@ struct GraphicsSettings {
     lights: u32,
     /// World draw distance: 0 Auto, 1 Unlimited, else metres (view_distance.rs).
     view_distance: u32,
+    /// Fog that ends at the view distance so far geometry fades in instead of popping.
+    view_fog: bool,
 }
 /// View distance choices: Auto, Unlimited, then metres.
 const VIEW_DISTANCES: &[u32] = &[0, 1, 150, 250, 400, 600, 1000];
@@ -94,6 +96,7 @@ impl Default for GraphicsSettings {
             shadows: 3,
             lights: 3,
             view_distance: 0,
+            view_fog: false,
         }
     }
 }
@@ -126,10 +129,10 @@ impl GraphicsSettings {
 }
 /// Skate 3-style pause tabs over the menu rows, in display order.
 pub(crate) const TABS: [(&str, &[usize]); 4] = [
-    ("Main", &[14, 10, 12, 6, 7, 22, 23, 8, 9]),
+    ("Main", &[14, 25, 10, 12, 6, 7, 22, 23, 8, 9]),
     ("Online", &[11]),
     ("Mod Settings", &[15, 16, 13]),
-    ("Options", &[21, 0, 1, 2, 19, 20, 24, 3, 4, 17, 5, 18]),
+    ("Options", &[21, 0, 1, 2, 19, 20, 24, 26, 3, 4, 17, 5, 18]),
 ];
 /// Tab buttons are menu rows numbered from here.
 pub(crate) const TAB_ROW: usize = 100;
@@ -140,6 +143,8 @@ pub(crate) fn tab_of(row: usize) -> Option<usize> {
 pub(crate) fn describe(row: usize) -> &'static str {
     match row {
         14 => "Explore San Vanelona and teleport to spots",
+        25 => "Skate 2 maps and other imported locations and their spots",
+        26 => "Fog that thickens toward the view distance, so nothing pops in",
         10 => "Change your skater's look and gear",
         12 => "Skate as a pro, a special or your own model",
         6 => "Choose a district or park to load",
@@ -247,6 +252,8 @@ impl Menu {
     /// Linear gain for a channel, master included.
     /// Street lamps that may be lit at once (quality setting).
     /// Draw distance for a world whose ground spans `extent` metres, if limited.
+    pub(crate) fn view_fog(&self) -> bool { self.settings.view_fog }
+    pub(crate) fn hour(&self) -> f32 { self.settings.hour }
     pub(crate) fn view_distance(&self, extent: f32) -> Option<f32> {
         match self.settings.view_distance {
             0 => (extent > crate::view_distance::AUTO_EXTENT).then_some(crate::view_distance::AUTO_DISTANCE),
@@ -452,7 +459,7 @@ fn setup(
                 }
             });
             panel.spawn((MenuRows, Node { width: percent(100), flex_direction: FlexDirection::Column, row_gap: px(4), ..default() })).with_children(|rows| {
-                for i in 0..25 {
+                for i in 0..27 {
                     rows.spawn((Button, MenuRow(i), Node {width:percent(100),min_height:px(26),padding:UiRect::all(px(3)),align_items:AlignItems::Center,border_radius:BorderRadius::all(px(5)),..default()},
                         BackgroundColor(Color::srgb(0.08,0.11,0.15)))).with_children(|row| {
                         row.spawn((MenuLabel(i),Text::new(""),TextFont {font_size:18.,..default()},TextColor(Color::WHITE)));
@@ -714,6 +721,7 @@ pub(crate) fn interact(
                 23 => menu.play_movie = Some(crate::movies::MOVIES[menu.movie].0.into()),
                 20 => menu.settings.lights = (menu.settings.lights as i32 + direction).clamp(0, 3) as u32,
                 24 => menu.settings.view_distance = cycle(VIEW_DISTANCES, menu.settings.view_distance, direction),
+                26 => menu.settings.view_fog = !menu.settings.view_fog,
                 21 => {
                     let current = PRESETS.iter().position(|p| menu.settings.scale == p.1 && menu.settings.samples == p.2
                         && menu.settings.shadows == p.3 && menu.settings.lights == p.4).unwrap_or(2);
@@ -760,6 +768,8 @@ pub(crate) fn interact(
                 12 => custom_models.begin(),
                 13 => menu.status = updater.open(false),
                 14 => travel.open = true,
+                25 => { travel.open = true; travel.custom = true; }
+                26 => menu.settings.view_fog = !menu.settings.view_fog,
                 15 => mods.begin(),
                 17 => menu.settings.fullscreen = !menu.settings.fullscreen,
                 18 => { menu.audio = true; menu.selected = 0; menu.status = "Left/Right adjusts. Music: N next song, M mute.".into(); },
@@ -1035,6 +1045,8 @@ fn labels(
                 13 => "Updates".into(),
                 15 => "Mods".into(),
                 14 => "Challenge Map".into(),
+                25 => "Custom Spots".into(),
+                26 => format!("Distance fog          {}", if s.view_fog { "On" } else { "Off" }),
                 16 => "Day & Night".into(),
                 18 => "Audio".into(),
                 17 => format!(
