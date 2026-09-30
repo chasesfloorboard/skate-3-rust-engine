@@ -225,6 +225,25 @@ fn interact(
             }
         }
     }
+    // Test hook: SKATE_DEBUG_TOUR="t:x,y,z,yaw;..." moves the skater to each
+    // spot (yaw in degrees about +Y) t seconds after startup; pair with
+    // SKATE_VERIFY_TIMES to photograph several places in one run.
+    if let Ok(tour) = std::env::var("SKATE_DEBUG_TOUR") {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let started = *travel.debug_clock.get_or_insert_with(std::time::Instant::now);
+        let stops: Vec<(f32, Vec<f32>)> = tour.split(';').filter_map(|s| {
+            let (t, p) = s.split_once(':')?;
+            Some((t.trim().parse().ok()?, p.split(',').filter_map(|c| c.trim().parse().ok()).collect()))
+        }).collect();
+        let next = NEXT.load(std::sync::atomic::Ordering::Relaxed);
+        if let Some((t, p)) = stops.get(next) && started.elapsed().as_secs_f32() >= *t && p.len() >= 3 {
+            NEXT.store(next + 1, std::sync::atomic::Ordering::Relaxed);
+            let (s, c) = p.get(3).copied().unwrap_or(0.0).to_radians().sin_cos();
+            let m = [[c, 0.0, -s, 0.0], [0.0, 1.0, 0.0, 0.0], [s, 0.0, c, 0.0], [p[0], p[1], p[2], 1.0]];
+            info!("SKATE_DEBUG_TOUR stop {next} at {:?}", &p);
+            if let Err(e) = skater.travel_to(m) { warn!("Travel: {e}"); }
+        }
+    }
     if travel.generation != Some(map.generation) {
         travel.generation = Some(map.generation); travel.open = false; travel.shown = false;
         for e in &roots { commands.entity(e).despawn(); }
