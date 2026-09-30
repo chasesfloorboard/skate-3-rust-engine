@@ -257,8 +257,9 @@ fn interact(
         travel.rows = rows;
         travel.build_groups();
         // Opt-in visual check of the challenge map, like SKATE_VERIFY_REPLAY.
-        if map.generation == 0 && matches!(std::env::var("SKATE_VERIFY_TRAVEL").as_deref(), Ok("1" | "2")) {
+        if map.generation == 0 && matches!(std::env::var("SKATE_VERIFY_TRAVEL").as_deref(), Ok("1" | "2" | "3")) {
             travel.open = true;
+            travel.custom = std::env::var("SKATE_VERIFY_TRAVEL").as_deref() == Ok("3");
             menu.open = true;
         }
         let target = travel.pending.take().or_else(|| (map.generation == 0).then(|| config.teleport.clone()).flatten());
