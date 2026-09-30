@@ -505,6 +505,9 @@ def main():
             if screenshot(ARGS.game, installation, destination / f'{spec.key}.skate', destination / 'preview.png'):
                 location['image'] = 'preview.png'
                 (destination / 'location.json').write_text(json.dumps(location, indent=1))
+        if spec.stream == 'BAM':
+            from tools.skate2.scenery import write_backdrop
+            write_backdrop(raw, spec.key, assets / 'private/native-backdrops' / f'{spec.key}.skate')
         skies = assets / 'private/native-skies'
         for suffix in ('.json', '.rgba', '.sun.rgba'):
             if (skies / f'{ARGS.sky}{suffix}').exists():

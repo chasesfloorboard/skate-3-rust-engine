@@ -107,7 +107,8 @@ impl Config {
         config.map_fingerprint = map_fingerprint(config.map_path.as_deref())?;
         if config.multiplayer.direct.is_some() && config.multiplayer.session==0 {return Err("Direct multiplayer requires --net-session (a nonzero number shared by both players)".into());}
         if let Some(id) = &config.teleport {
-            let destinations = crate::teleport_menu::load(&config.asset_root)?;
+            // Retail and custom-location destinations; a Skate 2 copy has no retail catalog.
+            let destinations = crate::teleport_menu::load_all(&config.asset_root);
             let target = destinations.iter().find(|d| &d.id == id).ok_or("Unknown teleport destination")?;
             if target.matrix.is_none() || !config.map_path.as_ref().is_some_and(|p| crate::teleport_menu::same_map(p, &target.map)) {
                 return Err("Teleport destination is unavailable or belongs to a different map".into());

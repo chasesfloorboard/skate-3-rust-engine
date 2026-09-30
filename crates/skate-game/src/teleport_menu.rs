@@ -34,7 +34,7 @@ pub(crate) fn load(assets: &Path) -> Result<Vec<Destination>, String> {
 
 /// Retail destinations (when installed) plus imported custom locations: a
 /// row for each location (its start) followed by its spots.
-fn load_all(assets: &Path) -> Vec<Destination> {
+pub(crate) fn load_all(assets: &Path) -> Vec<Destination> {
     let mut rows = load(assets).unwrap_or_else(|e| { bevy::log::warn!("Travel destinations: {e}"); vec![] });
     let mut ids: std::collections::HashSet<String> = rows.iter().map(|d| d.id.clone()).collect();
     for loc in crate::custom_locations::all(assets) {
