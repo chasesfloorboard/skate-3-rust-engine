@@ -77,7 +77,7 @@ fn fog(
         let sun = ((menu.hour() - 6.0) / 12.0 * std::f32::consts::PI).sin();
         let day = (sun * 2.0 + 0.3).clamp(0.0, 1.0);
         let dark = 1.0 - (1.0 - day) * menu.night_depth().min(1.0) * 0.92;
-        let haze = Vec3::new(0.030, 0.038, 0.060).lerp(Vec3::new(0.36, 0.42, 0.52), day) * dark.max(day);
+        let haze = Vec3::new(0.030, 0.038, 0.060).lerp(Vec3::new(0.15, 0.19, 0.26), day) * dark.max(day);
         // f = saturate(d * x + y): 0 at half the limit, 1 at the limit.
         (Vec4::new(2.0 / limit, -1.0, 1.0, 0.0), haze.extend(-1.0))
     });
