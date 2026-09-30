@@ -211,7 +211,7 @@ def challenge_text(locator, text):
 
 # --------------------------------------------------------------------------- conversion
 
-def convert(spec, stream, stage, start, bam_textures):
+def convert(spec, stream, stage, start, bam_textures, props):
     from prepare_hawaiian_dream import prepare
     from prepare_university import EXCLUDED_NORMAL_TEXTURE_IDS
     from build_retail_collision_archive import build_archive
@@ -337,12 +337,40 @@ def convert(spec, stream, stage, start, bam_textures):
     manifest.write_text(json.dumps(m))
     log(f'{spec.key}: baked {len(baked)} lightmaps')
 
+    if props:
+        from tools.asset_pipeline.dynamic_props import export
+        catalog, cache = props
+        target = ARGS.installation.expanduser() / 'assets/private/native-props' / f'{spec.key}.skate'
+        target.parent.mkdir(parents=True, exist_ok=True)
+        placed, unresolved = export(manifest, [cache], target, catalog_path=catalog)
+        log(f'{spec.key}: {placed} props placed, {unresolved} without a Skate 2 template')
     collision = work / 'collision.rwcmset'
     build_archive(manifest, collision)
     final = stage / f'{spec.key}.skate'
     write_map(manifest, final, collision, log, prepared_spawn=(start[0], start[1] + 1.0, start[2]))
     log(f'{spec.key}: map written in {time.time() - started:.0f}s')
     return m, root
+
+
+def prop_catalog(skate2):
+    """Skate 2's movable-object templates (worldmisc.big world/dmo/DMO)."""
+    from prepare_hawaiian_dream import prepare
+    from tools.asset_pipeline.dynamic_props import save_catalog
+    work = Path(ARGS.work) / 'dmo'
+    path, cache = work / 'catalog.json', work / 'cache/DMO'
+    if path.exists():
+        return path, cache
+    bigf.extract(skate2 / 'data/content/worldmisc.big', work / 'raw')
+    prepare(stream_directory=work / 'raw/data/content/world/dmo/DMO', output_root=cache, utt_root=TOOLS / 'vendor/utt',
+            district_name='DMO', map_name='DMO', raw_texture_cache=True, allow_material_import_order_fallback=True)
+    save_catalog([cache], path)
+    # Placements bind texture GUIDs in the high-bit DMO namespace; Skate 2's
+    # stream keys omit that bit. Alias each texture under both keys.
+    data = json.loads(path.read_text())
+    for key, value in list(data['textures'].items()):
+        data['textures'][f'0x{int(key, 16) | 1 << 63:016x}'] = value
+    path.write_text(json.dumps(data))
+    return path, cache
 
 
 def photo(rx2, target):
@@ -392,6 +420,7 @@ def main():
     base = unpack_base(ARGS.skate2.expanduser()) if ARGS.skate2 else None
     city_text = strings(base) if base else {}
 
+    props = prop_catalog(ARGS.skate2.expanduser()) if ARGS.skate2 else None
     specs = [s for s in LOCATIONS if not ARGS.only or s.key in ARGS.only]
     # The city first: DLC maps borrow its shared textures.
     specs.sort(key=lambda s: s.stream != 'BAM')
@@ -422,7 +451,7 @@ def main():
         if stage.exists():
             shutil.rmtree(stage)
         stage.mkdir(parents=True)
-        m, root = convert(spec, stream, stage, start, bam_textures)
+        m, root = convert(spec, stream, stage, start, bam_textures, props)
         if spec.stream == 'BAM':
             bam_textures = {tid: (e, root) for tid, e in m['textures'].items() if 'rgba' in e}
 
@@ -477,7 +506,7 @@ def main():
             if (skies / f'{ARGS.sky}{suffix}').exists():
                 shutil.copyfile(skies / f'{ARGS.sky}{suffix}', skies / f'{spec.key}{suffix}')
         log(f'{spec.key}: installed with {len(spots)} spots')
-        if spec.stream != 'BAM':
+        if spec.stream != 'BAM' and not ARGS.keep_cache:
             shutil.rmtree(Path(ARGS.work) / 'convert' / spec.key, ignore_errors=True)
     if not ARGS.keep_cache:
         shutil.rmtree(Path(ARGS.work) / 'convert', ignore_errors=True)

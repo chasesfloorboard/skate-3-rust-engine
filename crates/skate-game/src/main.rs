@@ -42,6 +42,7 @@ mod session_marker;
 mod physics;
 mod skater_animation;
 mod verification;
+mod view_distance;
 mod performance;
 mod profiling;
 mod graphics_menu;

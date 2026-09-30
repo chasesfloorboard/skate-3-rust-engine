@@ -56,7 +56,11 @@ struct GraphicsSettings {
     shadows: u32,
     /// Street lamps lit at once: 0 none .. 3 many.
     lights: u32,
+    /// World draw distance: 0 Auto, 1 Unlimited, else metres (view_distance.rs).
+    view_distance: u32,
 }
+/// View distance choices: Auto, Unlimited, then metres.
+const VIEW_DISTANCES: &[u32] = &[0, 1, 150, 250, 400, 600, 1000];
 /// Shadow tiers: (map size, cascades, distance m).
 const SHADOW_TIERS: [(usize, usize, f32); 5] = [(1024, 1, 0.0), (1024, 1, 30.0), (2048, 2, 50.0), (4096, 3, 80.0), (4096, 4, 100.0)];
 const SHADOW_NAMES: [&str; 5] = ["Off", "Low", "Medium", "High", "Ultra"];
@@ -89,6 +93,7 @@ impl Default for GraphicsSettings {
             fullscreen: false,
             shadows: 3,
             lights: 3,
+            view_distance: 0,
         }
     }
 }
@@ -112,6 +117,7 @@ impl GraphicsSettings {
         }
         self.shadows = self.shadows.min(4);
         self.lights = self.lights.min(3);
+        if !VIEW_DISTANCES.contains(&self.view_distance) { self.view_distance = 0; }
         self
     }
     fn internal_size(&self, window: UVec2) -> UVec2 {
@@ -123,7 +129,7 @@ pub(crate) const TABS: [(&str, &[usize]); 4] = [
     ("Main", &[14, 10, 12, 6, 7, 22, 23, 8, 9]),
     ("Online", &[11]),
     ("Mod Settings", &[15, 16, 13]),
-    ("Options", &[21, 0, 1, 2, 19, 20, 3, 4, 17, 5, 18]),
+    ("Options", &[21, 0, 1, 2, 19, 20, 24, 3, 4, 17, 5, 18]),
 ];
 /// Tab buttons are menu rows numbered from here.
 pub(crate) const TAB_ROW: usize = 100;
@@ -154,6 +160,7 @@ pub(crate) fn describe(row: usize) -> &'static str {
         18 => "Master, music, board and ambience volume",
         19 => "Shadow detail and distance",
         20 => "How many street lamps light the night",
+        24 => "How far away the world is drawn. Auto limits only very big maps",
         21 => "Set everything at once, from Potato to Ultra",
         22 => "Pick one of the game's movies",
         23 => "Watch the movie (any button skips)",
@@ -239,6 +246,14 @@ impl Menu {
     }
     /// Linear gain for a channel, master included.
     /// Street lamps that may be lit at once (quality setting).
+    /// Draw distance for a world whose ground spans `extent` metres, if limited.
+    pub(crate) fn view_distance(&self, extent: f32) -> Option<f32> {
+        match self.settings.view_distance {
+            0 => (extent > crate::view_distance::AUTO_EXTENT).then_some(crate::view_distance::AUTO_DISTANCE),
+            1 => None,
+            metres => Some(metres as f32),
+        }
+    }
     pub(crate) fn street_light_limit(&self) -> usize {
         LIGHT_COUNTS[self.settings.lights.min(3) as usize]
     }
@@ -437,7 +452,7 @@ fn setup(
                 }
             });
             panel.spawn((MenuRows, Node { width: percent(100), flex_direction: FlexDirection::Column, row_gap: px(4), ..default() })).with_children(|rows| {
-                for i in 0..24 {
+                for i in 0..25 {
                     rows.spawn((Button, MenuRow(i), Node {width:percent(100),min_height:px(26),padding:UiRect::all(px(3)),align_items:AlignItems::Center,border_radius:BorderRadius::all(px(5)),..default()},
                         BackgroundColor(Color::srgb(0.08,0.11,0.15)))).with_children(|row| {
                         row.spawn((MenuLabel(i),Text::new(""),TextFont {font_size:18.,..default()},TextColor(Color::WHITE)));
@@ -698,6 +713,7 @@ pub(crate) fn interact(
                 22 => menu.movie = (menu.movie as i32 + direction).rem_euclid(crate::movies::MOVIES.len() as i32) as usize,
                 23 => menu.play_movie = Some(crate::movies::MOVIES[menu.movie].0.into()),
                 20 => menu.settings.lights = (menu.settings.lights as i32 + direction).clamp(0, 3) as u32,
+                24 => menu.settings.view_distance = cycle(VIEW_DISTANCES, menu.settings.view_distance, direction),
                 21 => {
                     let current = PRESETS.iter().position(|p| menu.settings.scale == p.1 && menu.settings.samples == p.2
                         && menu.settings.shadows == p.3 && menu.settings.lights == p.4).unwrap_or(2);
@@ -1004,6 +1020,7 @@ fn labels(
                 22 => format!("Movie                 {}", crate::movies::MOVIES[menu.movie].1),
                 23 => "Watch Movie".into(),
                 20 => format!("Street lights         {}", LIGHT_NAMES[s.lights.min(3) as usize]),
+                24 => format!("View distance         {}", match s.view_distance { 0 => "Auto".into(), 1 => "Unlimited".into(), m => format!("{m} m") }),
                 21 => format!("Quality preset        {}", PRESETS.iter().find(|p| s.scale == p.1 && s.samples == p.2
                     && s.shadows == p.3 && s.lights == p.4).map_or("Custom", |p| p.0)),
                 6 => format!(

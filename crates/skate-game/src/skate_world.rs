@@ -446,6 +446,27 @@ fn render_groups(
     groups
 }
 
+/// Split one batch's triangles by the view-distance grid cell of their
+/// centroid, when the batch spans more than a cell and a half.
+fn split_cells(geometry: &skate_data::skate_map::Geometry, indices: Vec<u32>) -> Vec<Vec<u32>> {
+    let cell = crate::view_distance::CELL;
+    let position = |i: u32| Vec3::from_array(geometry.vertices[i as usize].position);
+    let (lo, hi) = indices.iter().fold((Vec3::MAX, Vec3::MIN), |(lo, hi), &i| (lo.min(position(i)), hi.max(position(i))));
+    if indices.is_empty() || (hi.x - lo.x).max(hi.z - lo.z) <= cell * 1.5 {
+        return vec![indices];
+    }
+    let mut cells: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
+    for triangle in indices.chunks_exact(3) {
+        let centroid = triangle.iter().map(|&i| position(i)).sum::<Vec3>() / 3.0;
+        let key = ((centroid.x / cell).floor() as i32, (centroid.z / cell).floor() as i32);
+        cells.entry(key).or_default().extend_from_slice(triangle);
+    }
+    // Stable order keeps batch order (and blended sorting) deterministic.
+    let mut cells: Vec<_> = cells.into_iter().collect();
+    cells.sort_by_key(|(key, _)| *key);
+    cells.into_iter().map(|(_, indices)| indices).collect()
+}
+
 struct RenderGroup {
     material: usize,
     indices: Vec<u32>,
@@ -696,6 +717,14 @@ pub(crate) fn spawn_with_pieces(
             }
             None => vec![(None, indices)],
         };
+        // Batches spanning more than one view-distance cell are split per cell
+        // so far parts can be hidden (view_distance.rs).
+        let buckets: Vec<(Option<usize>, Vec<u32>)> = buckets.into_iter()
+            .flat_map(|(piece, indices)| match piece {
+                Some(_) => vec![(piece, indices)],
+                None => split_cells(&map.geometry, indices).into_iter().map(|i| (None, i)).collect(),
+            })
+            .collect();
         if pieces.is_some() && std::env::var("SKATE_DEBUG_PROPS").is_ok() {
             info!("PROP_MATERIAL {} retail={} mode={:?} textures={:?}", m.name, retail.is_some(),
                 retail.as_ref().map(|r| r.params.mode), m.textures);
@@ -762,9 +791,17 @@ pub(crate) fn spawn_with_pieces(
             }
         }
         let transform = Transform::from_translation(offset);
+        let cell = piece.is_none().then(|| {
+            let (min, max) = vertices.iter().fold((Vec3::MAX, Vec3::MIN), |(lo, hi), v| {
+                let p = Vec3::from_array(v.position);
+                (lo.min(p), hi.max(p))
+            });
+            crate::view_distance::WorldCell { min, max }
+        });
         if let Some(material) = &retail_handle {
             let mut entity = commands.spawn((Name::new(m.name.clone()), Mesh3d(meshes.add(mesh)), MeshMaterial3d(material.clone()), transform));
             if let Some(i) = piece { entity.insert(crate::props::PropPiece(i)); }
+            if let Some(cell) = cell { entity.insert(cell); }
             continue;
         }
         // Vertex colours above carry retail decal coordinates, never PBR tint.
@@ -803,6 +840,7 @@ pub(crate) fn spawn_with_pieces(
             transform,
         ));
         if let Some(i) = piece { entity.insert(crate::props::PropPiece(i)); }
+        if let Some(cell) = cell { entity.insert(cell); }
         if let Some(image) = texture(m.textures[1], 1) {
             entity.insert(bevy::pbr::Lightmap {
                 image,
@@ -812,6 +850,12 @@ pub(crate) fn spawn_with_pieces(
         }
         }
     }
+    let (lo, hi) = map.geometry.vertices.iter().fold((Vec3::MAX, Vec3::MIN), |(lo, hi), v| {
+        let p = Vec3::from_array(v.position);
+        (lo.min(p), hi.max(p))
+    });
+    let size = (hi - lo).max(Vec3::ZERO);
+    commands.insert_resource(crate::view_distance::WorldExtent(size.x.max(size.z)));
     crate::street_lights::spawn(map, commands);
     for light in &map.lights {
         let color = Color::linear_rgb(light.color[0], light.color[1], light.color[2]);
