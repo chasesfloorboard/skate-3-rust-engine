@@ -132,7 +132,7 @@ pub(crate) const TABS: [(&str, &[usize]); 4] = [
     ("Main", &[14, 25, 10, 12, 6, 7, 22, 23, 8, 9]),
     ("Online", &[11]),
     ("Mod Settings", &[15, 16, 13]),
-    ("Options", &[21, 0, 1, 2, 19, 20, 24, 26, 3, 4, 17, 5, 18]),
+    ("Options", &[21, 0, 1, 2, 19, 20, 24, 26, 3, 4, 17, 5, 27, 18]),
 ];
 /// Tab buttons are menu rows numbered from here.
 pub(crate) const TAB_ROW: usize = 100;
@@ -162,6 +162,7 @@ pub(crate) fn describe(row: usize) -> &'static str {
         4 => "Skip drawing hidden scenery",
         17 => "Borderless fullscreen",
         5 => "How forgiving the physics are",
+        27 => "Skate 2 or Skate 3 physics tuning (Freeskate). Applies when a district loads",
         18 => "Master, music, board and ambience volume",
         19 => "Shadow detail and distance",
         20 => "How many street lamps light the night",
@@ -170,6 +171,18 @@ pub(crate) fn describe(row: usize) -> &'static str {
         22 => "Pick one of the game's movies",
         23 => "Watch the movie (any button skips)",
         _ => "",
+    }
+}
+/// Freeskate's Skate 2 / Skate 3 physics choice; the editions fix their own.
+fn toggle_feel(root: &std::path::Path, feel: &mut crate::difficulty::Feel) -> String {
+    if crate::editions::current() != crate::editions::Edition::Freeskate {
+        return format!("{} physics are part of this edition", feel.label());
+    }
+    *feel = feel.toggled();
+    feel.set();
+    match feel.save(root) {
+        Ok(()) => format!("{} physics apply when a district loads", feel.label()),
+        Err(e) => format!("Could not save: {e}"),
     }
 }
 /// Volume percentages, saved to settings/audio.json beside graphics.json.
@@ -220,6 +233,7 @@ pub(crate) struct Menu {
     path: PathBuf,
     supported_msaa: Vec<u32>,
     difficulty: Difficulty,
+    feel: crate::difficulty::Feel,
     status: String,
     maps: Vec<crate::map_library::Entry>,
     selected_map: usize,
@@ -459,7 +473,7 @@ fn setup(
                 }
             });
             panel.spawn((MenuRows, Node { width: percent(100), flex_direction: FlexDirection::Column, row_gap: px(4), ..default() })).with_children(|rows| {
-                for i in 0..27 {
+                for i in 0..28 {
                     rows.spawn((Button, MenuRow(i), Node {width:percent(100),min_height:px(26),padding:UiRect::all(px(3)),align_items:AlignItems::Center,border_radius:BorderRadius::all(px(5)),..default()},
                         BackgroundColor(Color::srgb(0.08,0.11,0.15)))).with_children(|row| {
                         row.spawn((MenuLabel(i),Text::new(""),TextFont {font_size:18.,..default()},TextColor(Color::WHITE)));
@@ -483,6 +497,7 @@ fn setup(
         path,
         supported_msaa,
         difficulty: config.difficulty,
+        feel: crate::difficulty::Feel::for_edition(&config.asset_root),
         status: String::new(),
         maps,
         selected_map,
@@ -722,6 +737,7 @@ pub(crate) fn interact(
                 20 => menu.settings.lights = (menu.settings.lights as i32 + direction).clamp(0, 3) as u32,
                 24 => menu.settings.view_distance = cycle(VIEW_DISTANCES, menu.settings.view_distance, direction),
                 26 => menu.settings.view_fog = !menu.settings.view_fog,
+                27 => menu.status = toggle_feel(&config.asset_root, &mut menu.feel),
                 21 => {
                     let current = PRESETS.iter().position(|p| menu.settings.scale == p.1 && menu.settings.samples == p.2
                         && menu.settings.shadows == p.3 && menu.settings.lights == p.4).unwrap_or(2);
@@ -770,6 +786,7 @@ pub(crate) fn interact(
                 14 => travel.open = true,
                 25 => { travel.open = true; travel.custom = true; }
                 26 => menu.settings.view_fog = !menu.settings.view_fog,
+                27 => menu.status = toggle_feel(&config.asset_root, &mut menu.feel),
                 15 => mods.begin(),
                 17 => menu.settings.fullscreen = !menu.settings.fullscreen,
                 18 => { menu.audio = true; menu.selected = 0; menu.status = "Left/Right adjusts. Music: N next song, M mute.".into(); },
@@ -1026,6 +1043,8 @@ fn labels(
                     if s.occlusion { "On" } else { "Off" }
                 ),
                 5 => format!("Difficulty            {}", menu.difficulty.label()),
+                27 => format!("Physics               {}{}", menu.feel.label(),
+                    if crate::editions::current() == crate::editions::Edition::Freeskate { "" } else { " (edition)" }),
                 19 => format!("Shadows               {}", SHADOW_NAMES[s.shadows.min(4) as usize]),
                 22 => format!("Movie                 {}", crate::movies::list().get(menu.movie).map_or("None".into(), |m| m.title.clone())),
                 23 => "Watch Movie".into(),
@@ -1162,7 +1181,7 @@ mod tests {
                 movie: 0,
                 play_movie: None,
                 open: false, selected: 0, settings: GraphicsSettings::default(),
-                difficulty: Difficulty::Easy, path: PathBuf::new(), supported_msaa: vec![1, 2, 4, 8], status: String::new(),
+                difficulty: Difficulty::Easy, feel: Default::default(), path: PathBuf::new(), supported_msaa: vec![1, 2, 4, 8], status: String::new(),
                 multiplayer: false, browser: false, daylight: false,
                 audio: false, audio_settings: AudioSettings::default(), audio_path: PathBuf::new(), tab: 0,
                 maps: vec![crate::map_library::Entry { label: "Test world".into(), path: None }], selected_map: 0,

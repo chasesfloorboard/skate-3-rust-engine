@@ -35,14 +35,62 @@ impl Difficulty {
         }
     }
     pub fn save(self, root: &Path) -> Result<(), String> {
-        let path = Self::path(root);
-        std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
-        std::fs::write(path, serde_json::to_vec_pretty(&Saved { difficulty: self }).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())
+        write(root, Saved { difficulty: self, ..saved(root) })
     }
 }
-#[derive(Serialize, Deserialize)]
-struct Saved { difficulty: Difficulty }
+#[derive(Default, Serialize, Deserialize)]
+struct Saved { difficulty: Difficulty, #[serde(default)] physics: Feel }
+
+fn saved(root: &Path) -> Saved {
+    std::fs::read(Difficulty::path(root)).ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default()
+}
+fn write(root: &Path, saved: Saved) -> Result<(), String> {
+    let path = Difficulty::path(root);
+    std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+    std::fs::write(path, serde_json::to_vec_pretty(&saved).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())
+}
+
+/// Which game's physics tuning loads: Skate 3's vault, or Skate 2's
+/// (tools/skate2/physics.py). The Skate 2 and Skate 3 editions fix it;
+/// Freeskate keeps the player's choice in gameplay.json.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Feel {
+    #[default]
+    Skate3,
+    Skate2,
+}
+static FEEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+impl Feel {
+    pub const SKATE2_FILE: &str = "skater-collections-skate2.json";
+    pub fn current() -> Self {
+        if FEEL.load(std::sync::atomic::Ordering::Relaxed) { Self::Skate2 } else { Self::Skate3 }
+    }
+    pub fn set(self) { FEEL.store(self == Self::Skate2, std::sync::atomic::Ordering::Relaxed); }
+    pub fn label(self) -> &'static str { match self { Self::Skate3 => "Skate 3", Self::Skate2 => "Skate 2" } }
+    pub fn toggled(self) -> Self { match self { Self::Skate3 => Self::Skate2, Self::Skate2 => Self::Skate3 } }
+    /// The edition's fixed feel, or the saved Freeskate choice.
+    pub fn for_edition(root: &Path) -> Self {
+        match crate::editions::current() {
+            crate::editions::Edition::Skate2 => Self::Skate2,
+            crate::editions::Edition::Skate3 => Self::Skate3,
+            crate::editions::Edition::Freeskate => saved(root).physics,
+        }
+    }
+    pub fn save(self, root: &Path) -> Result<(), String> {
+        write(root, Saved { physics: self, ..saved(root) })
+    }
+    /// Skate 3's vault stands in when Skate 2's was never converted.
+    pub fn collections_file(self, root: &Path) -> &'static str {
+        if self == Self::Skate2 && root.join("private/stock").join(Self::SKATE2_FILE).is_file() {
+            Self::SKATE2_FILE
+        } else {
+            "skater-collections.json"
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

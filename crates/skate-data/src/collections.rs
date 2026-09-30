@@ -32,7 +32,12 @@ impl Collections {
     }
 
     pub fn load(asset_root: &Path) -> Result<Self, String> {
-        let path = asset_root.join("private/stock/skater-collections.json");
+        Self::load_named(asset_root, "skater-collections.json")
+    }
+
+    /// A converted vault in private/stock, e.g. Skate 2's physics tuning.
+    pub fn load_named(asset_root: &Path, file: &str) -> Result<Self, String> {
+        let path = asset_root.join("private/stock").join(file);
         let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         let data: Self = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
         if data.version != 1 {

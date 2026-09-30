@@ -293,7 +293,9 @@ impl GamePhysics {
     }
 
     fn load_world_difficulty(asset_root: &std::path::Path, terrain: ground::Terrain, map: Option<&skate_data::skate_map::SkateMap>, difficulty: crate::difficulty::Difficulty) -> Result<Self, String> {
-        let data = Collections::load(asset_root)?;
+        let feel = crate::difficulty::Feel::current();
+        let data = Collections::load_named(asset_root, feel.collections_file(asset_root))?;
+        eprintln!("SKATE_PHYSICS_FEEL {}", feel.label());
         let settings = PhysicsSettings::load(&data)?;
         let animation_profile = animation_phase::AnimationProfile::load(&data, difficulty.key())?;
         eprintln!(

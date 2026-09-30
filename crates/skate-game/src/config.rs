@@ -99,7 +99,18 @@ impl Config {
             Some(mode) => mode,
             None => crate::difficulty::Difficulty::load(&config.asset_root)?,
         };
-        if !explicit_map {
+        crate::difficulty::Feel::for_edition(&config.asset_root).set();
+        // Skate 2 cold start: the top of Danny Way's MegaPark mega ramp, whatever district was last loaded.
+        let mega_ramp = (!explicit_map && config.teleport.is_none() && crate::editions::current() == crate::editions::Edition::Skate2)
+            .then(|| crate::custom_locations::scan(&config.asset_root).into_iter().find(|l| l.key == "S2SanVanelona"))
+            .flatten()
+            .and_then(|city| city.location.destinations.iter().find(|s| s.id == "Z_SVM07_MegaPark")
+                .map(|spot| (city.spot_id(spot), city.map_path.clone())));
+        if let Some((spot, path)) = mega_ramp {
+            config.map = Some(skate_data::skate_map::SkateMap::load(&path)?);
+            config.map_path = Some(path.canonicalize().map_err(|e| e.to_string())?);
+            config.teleport = Some(spot);
+        } else if !explicit_map {
             if let Some(path) = crate::map_library::default_map(&config.asset_root)? {
                 config.map = Some(skate_data::skate_map::SkateMap::load(&path)?);
                 config.map_path = Some(path.canonicalize().map_err(|e| e.to_string())?);

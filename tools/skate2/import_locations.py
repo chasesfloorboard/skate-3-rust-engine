@@ -452,6 +452,9 @@ def main():
     packages = find_packages([p.expanduser() for p in ARGS.dlc])
     log('DLC packages: ' + (', '.join(sorted(packages)) or 'none'))
     base = unpack_base(ARGS.skate2.expanduser()) if ARGS.skate2 else None
+    if ARGS.skate2 and not ARGS.spots_only:
+        from skate2.physics import build as build_physics
+        build_physics(ARGS.skate2.expanduser(), installation, log)
     city_text = strings(base) if base else {}
 
     props = prop_catalog(ARGS.skate2.expanduser()) if ARGS.skate2 else None
