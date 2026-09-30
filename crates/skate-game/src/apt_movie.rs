@@ -128,6 +128,9 @@ impl Movie {
         let Some(text) = &character.text else {
             return Ok(());
         };
+        if self.text_assets.fonts.is_empty() {
+            return Ok(());
+        }
         let value = self.text_assets.localize(&vm.get(id, "text").text());
         vm.set(id, "_displayText", Value::Text(value.clone()))?;
         let font = self

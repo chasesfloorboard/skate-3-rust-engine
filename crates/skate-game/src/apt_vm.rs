@@ -92,6 +92,9 @@ pub struct Instruction {
     pub parameters: Vec<Parameter>,
     #[serde(default)]
     pub name: String,
+    /// getURL's window/level ("_level1").
+    #[serde(default)]
+    pub target_name: String,
 }
 
 #[derive(Clone, Debug)]
@@ -121,6 +124,16 @@ struct Scope {
 pub trait Host {
     fn property_changed(&mut self, _vm: &mut Vm, _object: usize, _key: &str) -> Result<(), String> {
         Ok(())
+    }
+    fn trace(&mut self, _message: &str) {}
+    /// Uniform integer below `limit` (ActionScript random()).
+    fn random(&mut self, limit: u32) -> u32 {
+        let _ = limit;
+        0
+    }
+    /// getURL into a level loads another movie (loadMovieNum).
+    fn get_url(&mut self, _vm: &mut Vm, url: &str, target: &str) -> Result<(), String> {
+        Err(format!("APT getURL {url} -> {target} has no host"))
     }
     fn call(
         &mut self,
@@ -236,6 +249,25 @@ impl Vm {
             current = o.prototype;
         }
         Value::Undefined
+    }
+    pub fn array(&mut self, values: Vec<Value>) -> Result<usize, String> {
+        let id = self.object(ObjectKind::Plain);
+        if let Value::Object(proto) = self.get(self.get_global_class("Array"), "prototype") {
+            self.objects[id].prototype = Some(proto);
+        }
+        let n = values.len();
+        for (index, value) in values.into_iter().enumerate() {
+            self.set(id, index.to_string(), value)?;
+        }
+        self.set(id, "length", Value::Number(n as f64))?;
+        Ok(id)
+    }
+    /// A global constructor, or the global object when the host defines none.
+    fn get_global_class(&self, name: &str) -> usize {
+        match self.get(self.global, name) {
+            Value::Object(id) => id,
+            _ => self.global,
+        }
     }
     pub fn begin_update(&mut self) {
         self.remaining = 100_000;
@@ -640,6 +672,117 @@ impl Vm {
                     }
                 }
                 0x3e => return Ok(stack.pop().unwrap_or_default()),
+                // trace: the retail build compiles its debug output in.
+                0x26 => {
+                    let message = pop(&mut stack)?;
+                    host.trace(&message.text());
+                }
+                0xa5 => {
+                    let object = pop(&mut stack)?;
+                    let name = i.operand.as_str().ok_or("APT member operand missing")?;
+                    stack.push(if let Value::Object(id) = object { self.get(id, name) } else { Value::Undefined });
+                }
+                0xa6 | 0xa7 => {
+                    let value = pop(&mut stack)?;
+                    let name = i.operand.as_str().ok_or("APT member operand missing")?.to_string();
+                    let object = if op == 0xa7 { pop(&mut stack)? } else { Value::Object(scope.this) };
+                    if op == 0xa6 && scope.locals.contains_key(&name) {
+                        scope.locals.insert(name, value);
+                    } else if let Value::Object(id) = object {
+                        self.set(id, &name, value)?;
+                        host.property_changed(self, id, &name)?;
+                    }
+                }
+                0x72 => {
+                    let name = pop(&mut stack)?.text();
+                    if scope.locals.contains_key(&name) {
+                        scope.locals.insert(name, Value::Number(0.0));
+                    } else {
+                        self.set(scope.this, &name, Value::Number(0.0))?;
+                    }
+                }
+                0x41 => {
+                    let name = pop(&mut stack)?.text();
+                    scope.locals.entry(name).or_insert(Value::Undefined);
+                }
+                0x3b => {
+                    let name = pop(&mut stack)?.text();
+                    let existed = scope.locals.remove(&name).is_some()
+                        || self.objects[scope.this].fields.remove(&name).is_some();
+                    stack.push(Value::Bool(existed));
+                }
+                0x42 => {
+                    let n = pop(&mut stack)?.number() as usize;
+                    if n > 4096 {
+                        return Err("APT array literal limit".into());
+                    }
+                    let values = (0..n).map(|_| pop(&mut stack)).collect::<Result<Vec<_>, _>>()?;
+                    let id = self.array(values)?;
+                    stack.push(Value::Object(id));
+                }
+                0x43 => {
+                    let n = pop(&mut stack)?.number() as usize;
+                    if n > 4096 {
+                        return Err("APT object literal limit".into());
+                    }
+                    let id = self.object(ObjectKind::Plain);
+                    if let Value::Object(proto) = self.get(self.get_global_class("Object"), "prototype") {
+                        self.objects[id].prototype = Some(proto);
+                    }
+                    for _ in 0..n {
+                        let value = pop(&mut stack)?;
+                        let key = pop(&mut stack)?.text();
+                        self.set(id, key, value)?;
+                    }
+                    stack.push(Value::Object(id));
+                }
+                0x4a => {
+                    let n = pop(&mut stack)?.number();
+                    stack.push(Value::Number(n));
+                }
+                0x4b => {
+                    let t = pop(&mut stack)?.text();
+                    stack.push(Value::Text(t));
+                }
+                0x18 => {
+                    let n = pop(&mut stack)?.number();
+                    stack.push(Value::Number(if n.is_finite() { n.trunc() } else { 0.0 }));
+                }
+                0x3f => {
+                    let b = pop(&mut stack)?.number();
+                    let a = pop(&mut stack)?.number();
+                    stack.push(Value::Number(a % b));
+                }
+                0x30 => {
+                    let n = pop(&mut stack)?.number().max(0.0) as u32;
+                    let r = host.random(n);
+                    stack.push(Value::Number(r as f64));
+                }
+                0x44 => {
+                    let v = pop(&mut stack)?;
+                    stack.push(Value::Text(match &v {
+                        Value::Undefined => "undefined",
+                        Value::Number(_) => "number",
+                        Value::Bool(_) => "boolean",
+                        Value::Text(_) => "string",
+                        Value::Object(id) => match self.objects.get(*id).map(|o| &o.kind) {
+                            Some(ObjectKind::Function(_)) => "function",
+                            Some(ObjectKind::Native(kind)) if kind == "MovieClip" => "movieclip",
+                            _ => "object",
+                        },
+                    }.into()));
+                }
+                0x81 => {
+                    host.call(self, scope.this, "gotoAndStop", vec![Value::Number(operand as f64 + 1.0)])?;
+                }
+                0x8c => {
+                    let label = i.operand.as_str().ok_or("APT label operand missing")?;
+                    host.call(self, scope.this, "gotoAndStop", vec![Value::Text(label.into())])?;
+                }
+                0x83 => {
+                    let url = i.operand.as_str().ok_or("APT getURL operand missing")?;
+                    host.get_url(self, url, &i.target_name)?;
+                }
                 _ => return Err(format!("Unsupported APT opcode {op:02x} at {:x}", i.offset)),
             }
             if stack.len() > 1024 {

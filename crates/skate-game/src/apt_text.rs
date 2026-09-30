@@ -31,6 +31,10 @@ pub struct TextAssets {
 impl TextAssets {
     pub fn load(json: &serde_json::Value) -> Result<Self, String> {
         let mut out = Self::default();
+        // Menu screens converted before their fonts exist carry no text assets.
+        if json["language"].is_null() {
+            return Ok(out);
+        }
         out.language =
             serde_json::from_value(json["language"].clone()).map_err(|e| e.to_string())?;
         for c in json["characters"]
