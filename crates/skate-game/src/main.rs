@@ -46,6 +46,7 @@ mod skater_animation;
 mod verification;
 mod view_distance;
 mod performance;
+mod soak;
 mod profiling;
 mod graphics_menu;
 mod modding;

@@ -99,7 +99,7 @@ pub(crate) struct Travel {
     rows: Vec<Destination>,
     /// Whether each row is on the loaded district; others load it first.
     local: Vec<bool>,
-    debug_done: bool,
+    debug_step: Option<usize>,
     debug_clock: Option<std::time::Instant>,
     generation: Option<u64>,
     map: Option<crate::challenge_map::MapData>,
@@ -215,17 +215,33 @@ fn interact(
 ) {
     travel.closed_this_frame = false;
     // Test hook: SKATE_DEBUG_TRAVEL=<destination id> travels there once, as
-    // choosing it on the challenge map does, 8 s in.
-    if let Ok(id) = std::env::var("SKATE_DEBUG_TRAVEL") {
+    // choosing it on the challenge map does, 8 s in. Several comma-separated
+    // ids are visited in turn every SKATE_DEBUG_TRAVEL_EVERY seconds (default
+    // 30), looping, loading other districts as needed (map leak checks).
+    if let Ok(ids) = std::env::var("SKATE_DEBUG_TRAVEL") {
+        let ids: Vec<&str> = ids.split(',').collect();
+        let every = std::env::var("SKATE_DEBUG_TRAVEL_EVERY").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(30.);
         let started = *travel.debug_clock.get_or_insert_with(std::time::Instant::now);
-        if !travel.debug_done && !travel.rows.is_empty() && started.elapsed().as_secs_f32() > 8.0 {
-            travel.debug_done = true;
+        let elapsed = started.elapsed().as_secs_f32() - 8.0;
+        let step = if elapsed < 0.0 { None } else { Some((elapsed / every) as usize) };
+        let due = step.filter(|&n| (ids.len() > 1 || n == 0) && travel.debug_step != Some(n));
+        if let Some(n) = due.filter(|_| !travel.rows.is_empty() && !transition.busy()) {
+            travel.debug_step = Some(n);
+            let id = ids[n % ids.len()];
             if let Some(row) = travel.rows.iter().position(|d| d.id == id) {
                 let d = travel.rows[row].clone();
                 info!("SKATE_DEBUG_TRAVEL {id} local={} target={:?}", travel.local[row], d.matrix.map(|m| m[3]));
                 if let (true, Some(m)) = (travel.local[row], d.matrix) {
                     if let Err(e) = skater.travel_to(m) { warn!("Travel: {e}"); }
+                } else if !travel.local[row] {
+                    match crate::map_library::discover(&config.asset_root).into_iter()
+                        .find(|e| e.path.as_ref().is_some_and(|p| same_map(p, &d.map))) {
+                        Some(entry) => { travel.pending = Some(d.id.clone()); transition.request(entry); }
+                        None => warn!("Travel: district {} is not installed", d.map),
+                    }
                 }
+            } else {
+                warn!("SKATE_DEBUG_TRAVEL: no destination {id}");
             }
         }
     }

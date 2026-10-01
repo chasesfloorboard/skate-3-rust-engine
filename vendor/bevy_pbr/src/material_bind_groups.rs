@@ -620,6 +620,14 @@ impl MaterialBindGroupAllocator {
         }
     }
 
+    /// Live materials in each bindless slab (empty for non-bindless).
+    pub fn slab_materials(&self) -> Vec<u32> {
+        match self {
+            Self::Bindless(bless) => bless.slabs.iter().map(|slab| slab.live_allocation_count).collect(),
+            Self::NonBindless(_) => vec![],
+        }
+    }
+
     /// Get number of bindless material allocations in slabs, returns 0 if it is
     /// [`Self::NonBindless`].
     pub fn allocations(&self) -> u64 {
@@ -854,10 +862,20 @@ impl MaterialBindGroupBindlessAllocator {
     ///
     /// Any resources that are no longer referenced are removed from the slab.
     fn free(&mut self, material_binding_id: MaterialBindingId) {
-        self.slabs
+        let slab = self
+            .slabs
             .get_mut(material_binding_id.group.0 as usize)
-            .expect("Slab should exist")
-            .free(material_binding_id.slot, &self.bindless_descriptor);
+            .expect("Slab should exist");
+        slab.free(material_binding_id.slot, &self.bindless_descriptor);
+        // skate3rust: a slab whose last material is gone starts over empty.
+        // Shared textures and samplers could stay counted in it after every
+        // material using them was freed, so after a map change the next
+        // map's materials were scattered over many part-filled slabs (more
+        // bind groups and draw batches each load: FPS fell with every map
+        // change). A fresh slab packs exactly like the first load.
+        if slab.live_allocation_count == 0 {
+            *slab = MaterialBindlessSlab::new(&self.bindless_descriptor);
+        }
     }
 
     /// Returns the slab with the given bind group index.
@@ -878,7 +896,8 @@ impl MaterialBindGroupBindlessAllocator {
         fallback_bindless_resources: &FallbackBindlessResources,
         fallback_image: &FallbackImage,
     ) {
-        for slab in &mut self.slabs {
+        // Slabs emptied by free() hold no materials and have no buffers yet.
+        for slab in self.slabs.iter_mut().filter(|slab| slab.live_allocation_count > 0) {
             slab.prepare(
                 render_device,
                 pipeline_cache,
@@ -897,7 +916,7 @@ impl MaterialBindGroupBindlessAllocator {
     ///
     /// Currently, this only consists of the bindless index tables.
     fn write_buffers(&mut self, render_device: &RenderDevice, render_queue: &RenderQueue) {
-        for slab in &mut self.slabs {
+        for slab in self.slabs.iter_mut().filter(|slab| slab.live_allocation_count > 0) {
             slab.write_buffer(render_device, render_queue);
         }
     }

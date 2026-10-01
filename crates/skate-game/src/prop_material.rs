@@ -69,6 +69,12 @@ fn adopt(
     mut materials: ResMut<Assets<PropMaterial>>,
     mut cache: Local<HashMap<AssetId<StandardMaterial>, Handle<PropMaterial>>>,
 ) {
+    // A map change removes its props' standard materials; drop their
+    // converted copies too, or every load keeps the old ones (and their
+    // textures) alive.
+    if cache.len() > standard.len() || standard.is_changed() {
+        cache.retain(|id, _| standard.contains(*id));
+    }
     for (entity, material, piece) in &pieces {
         if !piece && !parents.iter_ancestors(entity).any(|a| lit.contains(a)) { continue; }
         let Some(source) = standard.get(material) else { continue };

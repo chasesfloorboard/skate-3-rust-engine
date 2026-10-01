@@ -61,6 +61,7 @@ pub(crate) fn advance(
         info!("DAY_DEBUG hour={hour:.2} night={night:.2} dusk={dusk:.2} custom={}", !custom.is_empty());
     }
     let ids: Vec<_> = skies.ids().collect();
+    authored.retain(|id, _| skies.contains(*id));
     let mut sun = None;
     for id in ids {
         let Some(sky) = skies.get(id) else { continue };

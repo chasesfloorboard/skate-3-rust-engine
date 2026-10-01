@@ -137,6 +137,7 @@ pub(crate) fn build(
     app.add_plugins((crate::session_marker::SessionMarkerPlugin, crate::customiser::CustomiserPlugin));
     app.add_plugins(crate::custom_models::CustomModelsPlugin);
     app.add_plugins(crate::jiggle::JigglePlugin);
+    app.add_plugins(crate::soak::SoakPlugin);
     app.add_plugins(crate::movies::MoviesPlugin);
     app.add_plugins(crate::modding::ModdingPlugin);
     crate::teleport_menu::install(&mut app);

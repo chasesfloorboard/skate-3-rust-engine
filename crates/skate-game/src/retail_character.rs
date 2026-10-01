@@ -66,7 +66,7 @@ pub(crate) struct CharacterParams {
     pub sh: [Vec4; 9],
 }
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
-struct CharacterMaterial {
+pub(crate) struct CharacterMaterial {
     #[uniform(0)]
     params: CharacterParams,
     #[texture(1)]

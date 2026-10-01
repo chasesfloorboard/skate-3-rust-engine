@@ -48,6 +48,10 @@ enum Phase {
     Idle,
     Requested(Entry),
     Loading { entry: Entry, progress: Arc<AtomicU8>, job: JoinHandle<Result<PreparedWorld, String>> },
+    /// The old world is retired; the new one waits a few frames so the render
+    /// world frees the old materials before allocating the new ones (else each
+    /// map was scattered over part-filled bindless slabs: slower every load).
+    Retiring { frames: u8, prepared: std::sync::Mutex<Option<PreparedWorld>> },
     // Let extraction see the committed scene before releasing the pause menu.
     Publishing { frames: u8, notice: String },
 }
@@ -70,7 +74,7 @@ impl MapTransition {
                     0 => "reading and validating map", 1 => "building collision and rendering",
                     2 => "initializing skater, camera and rendering", _ => "finishing meshes, textures and sky",
                 }),
-            Phase::Publishing { .. } => "Loading — publishing the new world…".into(),
+            Phase::Retiring { .. } | Phase::Publishing { .. } => "Loading — publishing the new world…".into(),
         }
     }
 }
@@ -168,6 +172,14 @@ fn poll(world: &mut World) {
         },
         Phase::Loading { job, .. } => match job.join().unwrap_or_else(|_| Err("Map loader failed unexpectedly".into())) {
             Ok(prepared) => {
+                crate::map_render::MapAssets::retire(world);
+                Phase::Retiring { frames: 2, prepared: std::sync::Mutex::new(Some(prepared)) }
+            }
+            Err(error) => { failed(world, error); Phase::Idle }
+        },
+        Phase::Retiring { frames, prepared } if frames > 0 => Phase::Retiring { frames: frames - 1, prepared },
+        Phase::Retiring { prepared, .. } => match prepared.into_inner().ok().flatten() {
+            Some(prepared) => {
                 let mut notice = commit(world, prepared);
                 let config = world.resource::<Config>();
                 match crate::map_library::save_default(&config.asset_root, config.map_path.as_deref()) {
@@ -176,10 +188,11 @@ fn poll(world: &mut World) {
                 }
                 Phase::Publishing { frames: 3, notice }
             }
-            Err(error) => { failed(world, error); Phase::Idle }
+            None => { failed(world, "Map publication was lost".into()); Phase::Idle }
         },
         Phase::Publishing { frames, notice } if frames > 0 => Phase::Publishing { frames: frames - 1, notice },
         Phase::Publishing { notice, .. } => {
+            release_freed_memory();
             world.resource_mut::<crate::graphics_menu::Menu>().transition_finished(notice, true);
             world.resource_mut::<Time<Virtual>>().unpause();
             Phase::Idle
@@ -187,6 +200,21 @@ fn poll(world: &mut World) {
         Phase::Idle => Phase::Idle,
     };
     world.resource_mut::<MapTransition>().phase = next;
+}
+
+/// Hand the previous map's freed heap back to the OS. The loader threads
+/// allocate a whole district in their own malloc arenas; glibc keeps those
+/// pages after the old world is dropped, so without this the process grew
+/// by about a gigabyte per map change.
+fn release_freed_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        unsafe extern "C" { fn malloc_trim(pad: usize) -> i32; }
+        let started = Instant::now();
+        // SAFETY: glibc's malloc_trim takes no pointers and is thread-safe.
+        unsafe { malloc_trim(0) };
+        info!("MAP_MEMORY_TRIM ms={}", started.elapsed().as_millis());
+    }
 }
 
 fn failed(world: &mut World, error: String) {

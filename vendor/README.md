@@ -9,6 +9,15 @@ and capacity limits. This adds work during material allocation, not each frame.
 The game's explicit Vulkan shader probe tests reuse and retirement using real GPU
 texture identities. See `docs/cpu-followup-optimizations.md` for scope and limits.
 
+## Empty bindless slabs start over
+
+When the last material in a bindless slab is freed, the slab is replaced by a
+fresh empty one. Stale texture/sampler counts left in emptied slabs scattered
+each newly loaded map over many part-filled slabs, so frame time grew with every
+map change (University 350 -> 270 FPS after 9 loads). The game also publishes a
+new map two frames after retiring the old one (map_transition.rs Phase::Retiring),
+so the old materials are freed before the new ones are allocated.
+
 ## Conservative occlusion depth pyramid
 
 `bevy_core_pipeline` is vendored from crates.io 0.18.1 with its original licenses.
