@@ -48,7 +48,17 @@ struct Proportions {
     #[serde(default)]
     stock_ankle: Option<f32>,
 }
+const ALL: &str = "All characters";
 impl Entry {
+    /// Picker section: native rosters by category ("Skate 3 Pros"), other
+    /// characters by their game, personal imports under "Imported".
+    fn section(&self) -> String {
+        let game = self.game.clone();
+        match &self.native {
+            Some(native) => format!("{} {}s", game.as_deref().unwrap_or("Skate 3"), native.category),
+            None => game.filter(|g| g != "Custom").unwrap_or_else(|| "Imported".into()),
+        }
+    }
     fn asset_path(&self, file: &str) -> String {
         let prefix = if self.asset_prefix.is_empty() { "characters://" } else { &self.asset_prefix };
         format!("{prefix}entries/{}/{file}", self.id)
@@ -61,7 +71,8 @@ struct NativeCharacter {
 }
 pub(crate) fn native_animation_style(key: &str) -> &'static str {
     // TU3 GetCACSettings 82590BE0..82590DBC; other Marquees use Aggressive.
-    match key {
+    // Skate 2 pros (tools/skate2/roster.py, "s2_" keys) share Skate 3's styles.
+    match key.strip_prefix("s2_").unwrap_or(key) {
         "danny_way" => "DannyWay",
         "mike_carroll" => "MikeCarroll",
         "pj_ladd" => "PJLadd",
@@ -117,7 +128,8 @@ pub(crate) struct CustomModels {
     status: String,
     selected: usize,
     scroll: f32,
-    filter: usize,
+    /// Section being browsed (None: the section list).
+    section: Option<String>,
     dirty: bool,
 }
 impl CustomModels {
@@ -151,19 +163,66 @@ impl CustomModels {
             .and_then(|e| e.native.as_ref())
             .map(|n| native_animation_style(&n.key))
     }
+    /// Characters in the open section (every character under "All").
     fn visible_entries(&self) -> Vec<&Entry> {
-        self.entries
-            .iter()
-            .filter(|e| match self.filter {
-                1 => e.native.as_ref().is_some_and(|n| n.category == "Pro"),
-                2 => e.native.as_ref().is_some_and(|n| n.category == "Special"),
-                3 => e.native.is_none(),
-                _ => true,
-            })
-            .collect()
+        let mut list: Vec<&Entry> = match self.section.as_deref() {
+            None => return vec![],
+            Some(ALL) => self.entries.iter().collect(),
+            Some(section) => self.entries.iter().filter(|e| e.section() == section).collect(),
+        };
+        list.sort_by_key(|e| e.name.to_ascii_lowercase());
+        list
+    }
+    /// (section, character count, first character) in display order: Skate
+    /// rosters first, then other games, imports, and finally "All".
+    fn sections(&self) -> Vec<(String, usize, &Entry)> {
+        let mut sections: Vec<(String, usize, &Entry)> = vec![];
+        for entry in &self.entries {
+            let name = entry.section();
+            match sections.iter_mut().find(|s| s.0 == name) {
+                Some(s) => s.1 += 1,
+                None => sections.push((name, 1, entry)),
+            }
+        }
+        let rank = |name: &str| match name {
+            n if n.starts_with("Skate 3") => 0,
+            n if n.starts_with("Skate 2") => 1,
+            n if n.starts_with("Skate") => 2,
+            "Imported" => 4,
+            _ => 3,
+        };
+        sections.sort_by(|a, b| (rank(&a.0), &a.0).cmp(&(rank(&b.0), &b.0)));
+        if let Some(first) = self.entries.first() {
+            sections.push((ALL.into(), self.entries.len(), first));
+        }
+        sections
+    }
+    /// Cards on screen: sections, or the open section's characters.
+    fn card_count(&self) -> usize {
+        if self.section.is_some() { self.visible_entries().len() } else { self.sections().len() }
+    }
+    fn open_section(&mut self, section: Option<String>) {
+        let previous = self.section.take();
+        self.section = section;
+        self.scroll = 0.;
+        // Leaving a section highlights it again; entering one highlights the
+        // equipped character when it is there.
+        self.selected = match (&self.section, previous) {
+            (None, Some(previous)) => self.sections().iter().position(|s| s.0 == previous).map_or(0, |i| i + 4),
+            (Some(_), _) => self.visible_entries().iter()
+                .position(|e| self.active.as_ref() == Some(&e.id)).map_or(4, |i| i + 4),
+            _ => 4,
+        };
+        if self.selected >= 4 {
+            self.scroll = ((self.selected - 4) / COLUMNS) as f32 * ROW_HEIGHT;
+        }
     }
     pub fn begin(&mut self) {
         self.open = true;
+        self.section = None;
+        let active = self.active.as_ref().and_then(|id| self.entries.iter().find(|e| &e.id == id)).map(Entry::section);
+        self.selected = active.and_then(|a| self.sections().iter().position(|s| s.0 == a)).map_or(4, |i| i + 4);
+        self.scroll = 0.;
         self.just_opened = true;
         self.dirty = true;
     }
@@ -307,7 +366,7 @@ impl Plugin for CustomModelsPlugin {
             status: String::new(),
             selected: 0,
             scroll: 0.,
-            filter: 0,
+            section: None,
             dirty: true,
         })
         .add_systems(PreUpdate, interact.after(crate::graphics_menu::MenuInput))
@@ -353,12 +412,17 @@ fn interact(
         state.just_opened = false;
         return;
     }
-    if keys.just_pressed(KeyCode::Escape) || nav.pressed & (0x2000 | 0x10) != 0 {
-        state.open = false;
+    if keys.just_pressed(KeyCode::Escape) || keys.just_pressed(KeyCode::Backspace) || nav.pressed & (0x2000 | 0x10) != 0 {
+        // Back steps out of a section first, then closes the picker.
+        if state.section.is_some() {
+            state.open_section(None);
+        } else {
+            state.open = false;
+        }
         state.dirty = true;
         return;
     }
-    let count = state.visible_entries().len() + 4;
+    let count = state.card_count() + 4;
     let previous = state.selected;
     if keys.just_pressed(KeyCode::ArrowUp) || nav.pressed & 1 != 0 {
         state.selected = if state.selected >= 4 + COLUMNS {
@@ -422,10 +486,16 @@ fn interact(
             }
             1 => state.request_stock(),
             2 => {
-                state.filter = (state.filter + 1) % 4;
-                state.scroll = 0.;
+                let next = if state.section.is_some() { None } else { Some(ALL.to_owned()) };
+                state.open_section(next);
             }
+            3 if state.section.is_some() => state.open_section(None),
             3 => state.open = false,
+            action if action >= 4 && state.section.is_none() => {
+                if let Some(section) = state.sections().get(action - 4).map(|s| s.0.clone()) {
+                    state.open_section(Some(section));
+                }
+            }
             action if action >= 4 => {
                 if let Some(entry) = state.visible_entries().get(action - 4) {
                     state.request = Some(Some(entry.id.clone()));
@@ -510,9 +580,12 @@ fn poll_import(mut state: ResMut<CustomModels>) {
             let id = reply.as_ref().unwrap()["id"].as_str().unwrap_or("");
             if let Some(index) = state.entries.iter().position(|e| e.id == id) {
                 let id = state.entries[index].id.clone();
-                state.filter = 0;
-                state.selected = index + 4;
-                state.scroll = (index / COLUMNS) as f32 * ROW_HEIGHT;
+                let section = state.entries[index].section();
+                state.open_section(Some(section));
+                if let Some(i) = state.visible_entries().iter().position(|e| e.id == id) {
+                    state.selected = i + 4;
+                    state.scroll = (i / COLUMNS) as f32 * ROW_HEIGHT;
+                }
                 state.request = Some(Some(id));
                 "Imported. Loading character...".into()
             } else {
@@ -742,11 +815,19 @@ fn draw(
         .with_children(|root| { root.spawn((Node { width:px(800), height:percent(94), max_width:percent(96), padding:UiRect::all(px(20)),
             flex_direction:FlexDirection::Column, row_gap:px(14), ..default() }, BackgroundColor(Color::srgb(0.035,0.055,0.08))))
             .with_children(|panel| {
-                label(panel, "CUSTOM MODELS", 30.);
-                label(panel, "Choose a pro, special character, or your own imported model.", 17.);
+                match &state.section {
+                    Some(section) => {
+                        label(panel, &format!("CALL SKATER  /  {}", section.to_uppercase()), 30.);
+                        label(panel, "Choose a character to skate as.", 17.);
+                    }
+                    None => {
+                        label(panel, "CALL SKATER", 30.);
+                        label(panel, "Choose a roster: pros, specials, other games or your own imported models.", 17.);
+                    }
+                }
                 panel.spawn(Node { column_gap:px(10), ..default() }).with_children(|bar| {
                     button(bar,0, if state.import.is_some() { "Importing..." } else { "Import model..." },selected);
-                    button(bar,2,["Show: All", "Show: Pros", "Show: Specials", "Show: Imported"][state.filter],selected);
+                    button(bar,2,if state.section.is_some() { "Sections" } else { "Show all characters" },selected);
                     button(bar,1,if state.active.is_none() { "Stock skater (active)" } else { "Use stock skater" },selected);
                 });
                 panel.spawn((ModelScroll, ScrollPosition(Vec2::new(0., state.scroll)), Node {
@@ -754,7 +835,22 @@ fn draw(
                     grid_auto_rows:vec![GridTrack::px(CARD_HEIGHT)], column_gap:px(10), row_gap:px(10),
                     flex_grow:1., min_height:px(0), overflow:Overflow::scroll_y(), align_content:AlignContent::Start,
                     ..default() })).with_children(|cards| {
-                    for (i,entry) in state.visible_entries().into_iter().enumerate() {
+                    if state.section.is_none() {
+                        let active = state.active.as_ref().and_then(|id| state.entries.iter().find(|e| &e.id == id)).map(Entry::section);
+                        for (i,(name,count,first)) in state.sections().into_iter().enumerate() {
+                            let action=i+4;
+                            cards.spawn((Button,Action(action),Node { min_width:px(0),height:px(CARD_HEIGHT),align_items:AlignItems::Center,padding:UiRect::all(px(6)),flex_direction:FlexDirection::Column,row_gap:px(6), ..default() },
+                                BackgroundColor(if selected==action { Color::srgb(0.12,0.3,0.34) } else { Color::srgb(0.075,0.105,0.14) })))
+                                .with_children(|card| {
+                                    card.spawn((ImageNode::new(server.load(first.asset_path("preview.png"))),Node {width:px(128),height:px(160),..default()}));
+                                    label(card,&name,17.);
+                                    label(card,&format!("{count} character{}",if count==1 {""} else {"s"}),13.);
+                                    if active.as_deref()==Some(name.as_str()) { label(card,"Equipped inside",13.); }
+                                });
+                        }
+                        if state.entries.is_empty() { label(cards,"Your imported characters will appear here.",18.); }
+                    }
+                    else { for (i,entry) in state.visible_entries().into_iter().enumerate() {
                         let action=i+4;
                         cards.spawn((Button,Action(action),Node { min_width:px(0),height:px(CARD_HEIGHT),align_items:AlignItems::Center,padding:UiRect::all(px(6)),flex_direction:FlexDirection::Column,row_gap:px(6), ..default() },
                             BackgroundColor(if selected==action { Color::srgb(0.12,0.3,0.34) } else { Color::srgb(0.075,0.105,0.14) })))
@@ -765,11 +861,14 @@ fn draw(
                                 if state.active.as_ref()==Some(&entry.id) { label(card,"Equipped",14.); }
                             });
                     }
-                    if state.visible_entries().is_empty() { label(cards,"Your imported characters will appear here.",18.); }
+                    }
                 });
                 panel.spawn(Node { column_gap:px(10), ..default() }).with_children(|bar| {
-                    label(bar,&format!("{} models / Scroll to browse",state.visible_entries().len()),16.);
-                    button(bar,3,"Back",selected);
+                    match state.section {
+                        Some(_) => label(bar,&format!("{} characters / Scroll to browse",state.visible_entries().len()),16.),
+                        None => label(bar,&format!("{} sections / {} characters",state.sections().len().saturating_sub(1),state.entries.len()),16.),
+                    }
+                    button(bar,3,if state.section.is_some() { "Back to sections" } else { "Back" },selected);
                 });
                 label(panel,&state.status,16.);
                 label(panel,"Up/Down select · Enter/A equip · Escape/B back\nNative characters retain retail animation styles. Imports use your customiser style.",14.);
