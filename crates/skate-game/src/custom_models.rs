@@ -313,7 +313,14 @@ fn discover(directory: &Path) -> Vec<Entry> {
 }
 fn discover_all(directory: &Path, native_directory: &Path, native_prefix: &str) -> Vec<Entry> {
     let mut entries = discover(directory);
-    for mut native in discover(native_directory).into_iter().filter(|e| e.native.is_some()) {
+    // Native rosters follow the edition: Skate 2's pros in Skate 2, Skate 3's
+    // in Skate 3, both in Freeskate. Other games and imports are always there.
+    let edition = crate::editions::current();
+    let shown = |e: &Entry| {
+        use crate::editions::Game;
+        edition.shows(Some(if e.game.as_deref() == Some("Skate 2") { Game::Skate2 } else { Game::Skate3 }))
+    };
+    for mut native in discover(native_directory).into_iter().filter(|e| e.native.is_some() && shown(e)) {
         entries.retain(|entry| entry.id != native.id);
         native.asset_prefix = native_prefix.to_owned();
         entries.push(native);
@@ -390,6 +397,16 @@ fn interact(
     config: Res<crate::config::Config>,
     manifest: Res<crate::assets::AssetManifest>,
 ) {
+    // Test hook: SKATE_DEBUG_CALLSKATER=1 opens the picker on its sections,
+    // =<section> opens that section (for --verify screenshots).
+    if let Ok(section) = std::env::var("SKATE_DEBUG_CALLSKATER") {
+        static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !state.entries.is_empty() && !DONE.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            state.begin();
+            state.just_opened = false;
+            if section != "1" { state.open_section(Some(section)); }
+        }
+    }
     if !state.open {
         wheel.clear();
         return;
@@ -857,7 +874,7 @@ fn draw(
                             .with_children(|card| {
                                 card.spawn((ImageNode::new(server.load(entry.asset_path("preview.png"))),Node {width:px(128),height:px(160),..default()}));
                                 label(card,&entry.name,15.);
-                                if let Some(native) = &entry.native { label(card,&format!("{} · Native",native.category),12.); }
+                                if let Some(native) = &entry.native { label(card,&format!("{} - Native",native.category),12.); }
                                 if state.active.as_ref()==Some(&entry.id) { label(card,"Equipped",14.); }
                             });
                     }
@@ -871,7 +888,7 @@ fn draw(
                     button(bar,3,if state.section.is_some() { "Back to sections" } else { "Back" },selected);
                 });
                 label(panel,&state.status,16.);
-                label(panel,"Up/Down select · Enter/A equip · Escape/B back\nNative characters retain retail animation styles. Imports use your customiser style.",14.);
+                label(panel,"Up/Down select - Enter/A equip - Escape/B back\nNative characters retain retail animation styles. Imports use your customiser style.",14.);
             }); });
 }
 fn label(parent: &mut ChildSpawnerCommands, text: &str, size: f32) {
