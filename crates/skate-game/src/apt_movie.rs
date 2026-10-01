@@ -26,6 +26,9 @@ pub struct Instance {
     pub playing: bool,
     pub children: BTreeMap<i32, usize>,
     pub placement: Option<Placement>,
+    /// Clips made by script (createEmptyMovieClip, attachMovie, loadClip).
+    /// Timeline seeks never remove them.
+    pub dynamic: BTreeMap<i32, usize>,
 }
 pub struct Movie {
     pub characters: BTreeMap<i32, Character>,
@@ -35,11 +38,35 @@ pub struct Movie {
     pub root: usize,
     pub text_assets: crate::apt_text::TextAssets,
     states: BTreeMap<i32, Vec<DisplayList>>,
+    /// Prototype for every clip this movie creates (MovieClip.prototype).
+    pub clip_prototype: Option<usize>,
+    /// Exported symbols: name -> character id.
+    pub exports: BTreeMap<String, i32>,
+    /// Imported characters: id -> (movie file, exported symbol).
+    pub imports: BTreeMap<i32, (String, String)>,
+    /// Placed imports waiting for their library movie: (clip, file, symbol,
+    /// parent). The stage instantiates them before the next script runs.
+    pub pending_imports: Vec<(usize, String, String, Option<usize>)>,
+    /// Placed clips that became another movie's (imports): clip -> the
+    /// import's character id here, and their last placement.
+    imported: BTreeMap<usize, (i32, Option<Placement>)>,
+    /// Imported clips this timeline dropped; the stage removes them from
+    /// their library movie.
+    pub removed_imports: Vec<usize>,
 }
+#[derive(Deserialize)]
+struct Import {
+    file: String,
+    name: String,
+    character_id: i32,
+}
+/// Character id of script-created empty clips.
+pub const EMPTY_CLIP: i32 = -1;
 impl Movie {
     pub fn load(json: &serde_json::Value) -> Result<Self, String> {
-        let characters: Vec<Character> =
+        let mut characters: Vec<Character> =
             serde_json::from_value(json["characters"].clone()).map_err(|e| e.to_string())?;
+        characters.push(Character { id: EMPTY_CLIP, type_name: "empty".into(), frames: vec![], text: None, bounds: None });
         let mut states = BTreeMap::new();
         for c in &characters {
             let mut list = DisplayList::default();
@@ -60,7 +87,33 @@ impl Movie {
             root: usize::MAX,
             text_assets: crate::apt_text::TextAssets::load(json)?,
             states,
+            clip_prototype: None,
+            exports: json["exports"].as_array().into_iter().flatten()
+                .filter_map(|e| Some((e["name"].as_str()?.to_string(), e["character_id"].as_i64()? as i32))).collect(),
+            imports: serde_json::from_value::<Vec<Import>>(json["imports"].clone()).unwrap_or_default()
+                .into_iter().map(|i| (i.character_id, (i.file, i.name))).collect(),
+            pending_imports: Vec::new(),
+            imported: BTreeMap::new(),
+            removed_imports: Vec::new(),
         })
+    }
+    /// An empty stand-in while a movie is temporarily moved out of a list.
+    pub fn placeholder() -> Self {
+        Self {
+            characters: BTreeMap::new(),
+            instances: BTreeMap::new(),
+            actions: BTreeMap::new(),
+            pending: VecDeque::new(),
+            root: usize::MAX,
+            text_assets: Default::default(),
+            states: BTreeMap::new(),
+            clip_prototype: None,
+            exports: BTreeMap::new(),
+            imports: BTreeMap::new(),
+            pending_imports: Vec::new(),
+            imported: BTreeMap::new(),
+            removed_imports: Vec::new(),
+        }
     }
     pub fn initialize(&mut self, vm: &mut Vm) -> Result<(), String> {
         self.root = self.create(vm, 0, None, 0)?;
@@ -78,15 +131,48 @@ impl Movie {
         parent: Option<usize>,
         depth: usize,
     ) -> Result<usize, String> {
-        if depth > 32 || self.instances.len() > 2048 {
+        let id = vm.object(ObjectKind::Native(format!("movie:{character}")));
+        self.attach(vm, id, character, parent, depth)?;
+        Ok(id)
+    }
+    /// Give an existing clip object this movie's character: loadClip into a
+    /// target keeps the target's identity, as in Flash.
+    pub fn adopt(&mut self, vm: &mut Vm, id: usize, character: i32, parent: Option<usize>) -> Result<(), String> {
+        vm.objects.get_mut(id).ok_or("Invalid APT clip handle")?.kind = ObjectKind::Native(format!("movie:{character}"));
+        if self.root == usize::MAX {
+            self.root = id;
+        }
+        self.attach(vm, id, character, parent, 0)
+    }
+    /// Give an existing clip (another movie's import placeholder) one of this
+    /// movie's characters, keeping the clip's identity.
+    pub fn adopt_import(&mut self, vm: &mut Vm, id: usize, character: i32, parent: Option<usize>) -> Result<(), String> {
+        vm.objects.get_mut(id).ok_or("Invalid APT clip handle")?.kind = ObjectKind::Native(format!("movie:{character}"));
+        self.attach(vm, id, character, parent, 0)
+    }
+    /// A script-made child clip under `parent` (which may belong to another movie).
+    pub fn create_child(&mut self, vm: &mut Vm, character: i32, parent: usize) -> Result<usize, String> {
+        self.create(vm, character, Some(parent), 0)
+    }
+    fn attach(&mut self, vm: &mut Vm, id: usize, character: i32, parent: Option<usize>, depth: usize) -> Result<(), String> {
+        if depth > 32 || self.instances.len() > 65536 {
             return Err("APT movie hierarchy limit".into());
         }
+        // An imported symbol: an empty clip now, the library's character once
+        // the stage has loaded that movie (Flash resolves imports at load).
+        let character = if !self.characters.contains_key(&character) && let Some((file, symbol)) = self.imports.get(&character) {
+            self.pending_imports.push((id, file.clone(), symbol.clone(), parent));
+            self.imported.insert(id, (character, None));
+            EMPTY_CLIP
+        } else {
+            character
+        };
         let c = self
             .characters
             .get(&character)
-            .ok_or("APT unknown character")?
+            .ok_or_else(|| format!("APT unknown character {character}"))?
             .clone();
-        let id = vm.object(ObjectKind::Native(format!("movie:{character}")));
+        vm.objects[id].prototype = self.clip_prototype;
         if self.root != usize::MAX {
             vm.set(id, "_root", Value::Object(self.root))?;
         }
@@ -112,13 +198,14 @@ impl Movie {
                 playing: !c.frames.is_empty(),
                 children: BTreeMap::new(),
                 placement: None,
+                dynamic: BTreeMap::new(),
             },
         );
         self.text_changed(vm, id)?;
         if !c.frames.is_empty() {
             self.seek(vm, id, 0, depth + 1)?;
         }
-        Ok(id)
+        Ok(())
     }
     pub fn text_changed(&self, vm: &mut Vm, id: usize) -> Result<(), String> {
         let Some(instance) = self.instances.get(&id) else {
@@ -156,9 +243,12 @@ impl Movie {
         )?;
         Ok(())
     }
-    fn remove(&mut self, vm: &mut Vm, id: usize) {
+    pub fn remove(&mut self, vm: &mut Vm, id: usize) {
+        if self.imported.remove(&id).is_some() {
+            self.removed_imports.push(id);
+        }
         if let Some(instance) = self.instances.remove(&id) {
-            for child in instance.children.values() {
+            for child in instance.children.values().chain(instance.dynamic.values()) {
                 self.remove(vm, *child);
             }
         }
@@ -209,9 +299,8 @@ impl Movie {
                 }
             }
             let child = if let Some(old) = previous.filter(|old| {
-                self.instances
-                    .get(old)
-                    .is_some_and(|i| i.character == placement.character)
+                self.imported.get(old).is_some_and(|i| i.0 == placement.character)
+                    || self.instances.get(old).is_some_and(|i| i.character == placement.character)
             }) {
                 old
             } else {
@@ -220,7 +309,10 @@ impl Movie {
                 }
                 self.create(vm, placement.character, Some(id), nesting + 1)?
             };
-            let old = self.instances[&child].placement.as_ref();
+            let old = match self.imported.get(&child) {
+                Some((_, placed)) => placed.as_ref(),
+                None => self.instances[&child].placement.as_ref(),
+            };
             if old.is_none_or(|old| old.matrix != placement.matrix) {
                 vm.set(child, "_x", Value::Number(placement.matrix[4] as f64))?;
                 vm.set(child, "_y", Value::Number(placement.matrix[5] as f64))?;
@@ -228,7 +320,10 @@ impl Movie {
             if !placement.name.is_empty() {
                 vm.set(id, &placement.name, Value::Object(child))?;
             }
-            self.instances.get_mut(&child).unwrap().placement = Some(placement);
+            match self.imported.get_mut(&child) {
+                Some(entry) => entry.1 = Some(placement),
+                None => self.instances.get_mut(&child).unwrap().placement = Some(placement),
+            }
             children.insert(depth, child);
         }
         for (depth, child) in &instance.children {

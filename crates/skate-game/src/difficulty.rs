@@ -100,7 +100,7 @@ mod tests {
         for (index, d) in Difficulty::ALL.into_iter().enumerate() {
             assert_eq!(d as usize, index);
             assert_eq!(Difficulty::parse(d.label()).unwrap(), d);
-            let bytes = serde_json::to_vec(&Saved { difficulty: d }).unwrap();
+            let bytes = serde_json::to_vec(&Saved { difficulty: d, physics: Feel::default() }).unwrap();
             assert_eq!(serde_json::from_slice::<Saved>(&bytes).unwrap().difficulty, d);
         }
         assert!(Difficulty::parse("motorized").is_err());

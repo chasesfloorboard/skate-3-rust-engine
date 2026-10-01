@@ -113,6 +113,9 @@ pub struct Object {
 struct Function {
     code: Instruction,
     constants: Vec<Value>,
+    /// The timeline (or object) whose script defined it: plain calls run
+    /// with it as `this`, approximating Flash's defining scope chain.
+    home: usize,
 }
 
 struct Scope {
@@ -131,6 +134,12 @@ pub trait Host {
         let _ = limit;
         0
     }
+    /// Methods on strings and other primitives ("abc".substr(1)).
+    fn primitive_call(&mut self, _vm: &mut Vm, _value: &Value, _method: &str, _args: Vec<Value>) -> Result<Value, String> {
+        Ok(Value::Undefined)
+    }
+    /// A script called a method on a value that is not an object.
+    fn missing_call(&mut self, _method: &str) {}
     /// getURL into a level loads another movie (loadMovieNum).
     fn get_url(&mut self, _vm: &mut Vm, url: &str, target: &str) -> Result<(), String> {
         Err(format!("APT getURL {url} -> {target} has no host"))
@@ -151,6 +160,10 @@ pub struct Vm {
     pub global: usize,
     remaining: usize,
     depth: usize,
+    /// Flash scoping for named functions: a timeline script defines them on
+    /// its clip, a function body as locals. The HUD keeps its original
+    /// global definitions.
+    pub timeline_functions: bool,
 }
 impl Vm {
     fn variable(&self, scope: &Scope, key: &str) -> Value {
@@ -327,6 +340,13 @@ impl Vm {
         }
         host.call(self, object, method, args)
     }
+    /// Call a script function object with `this` (AS2 constructors on attached clips).
+    pub fn call_function(&mut self, function: usize, this: usize, args: Vec<Value>, host: &mut impl Host) -> Result<Value, String> {
+        match self.objects.get(function).map(|o| o.kind.clone()) {
+            Some(ObjectKind::Function(index)) => self.invoke(index, this, args, host),
+            _ => Err("APT call of a non-function".into()),
+        }
+    }
     fn invoke(
         &mut self,
         index: usize,
@@ -418,8 +438,10 @@ impl Vm {
     ) -> Result<Value, String> {
         let mut stack = Vec::<Value>::new();
         let mut pc = 0;
+        // Flash yields undefined for an empty-stack pop; EA's compiler emits
+        // such pops (e.g. after `if (!_global.x) _global.x = f` in init actions).
         fn pop(s: &mut Vec<Value>) -> Result<Value, String> {
-            s.pop().ok_or("APT stack underflow".into())
+            Ok(s.pop().unwrap_or_default())
         }
         while let Some(i) = code.get(pc) {
             if self.remaining == 0 || self.objects.len() > 4096 {
@@ -512,10 +534,10 @@ impl Vm {
                     }
                     .text();
                     let obj = pop(&mut stack)?;
-                    stack.push(if let Value::Object(id) = obj {
-                        self.get(id, &name)
-                    } else {
-                        Value::Undefined
+                    stack.push(match obj {
+                        Value::Object(id) => self.get(id, &name),
+                        Value::Text(text) if name == "length" => Value::Number(text.chars().count() as f64),
+                        _ => Value::Undefined,
                     });
                 }
                 0x4f => {
@@ -593,14 +615,19 @@ impl Vm {
                     self.functions.push(Function {
                         code: i.clone(),
                         constants: constants.clone(),
+                        home: scope.this,
                     });
                     let object = self.object(ObjectKind::Function(index));
                     let proto = self.object(ObjectKind::Plain);
                     self.set(object, "prototype", Value::Object(proto))?;
                     if i.name.is_empty() {
                         stack.push(Value::Object(object));
-                    } else {
+                    } else if !self.timeline_functions {
                         self.set(self.global, &i.name, Value::Object(object))?;
+                    } else if scope.local_definitions {
+                        scope.locals.insert(i.name.clone(), Value::Object(object));
+                    } else {
+                        self.set(scope.this, &i.name, Value::Object(object))?;
                     }
                 }
                 0x69 => {
@@ -623,12 +650,17 @@ impl Vm {
                     let args = (0..n)
                         .map(|_| pop(&mut stack))
                         .collect::<Result<Vec<_>, _>>()?;
-                    let id = self.object(ObjectKind::Plain);
+                    let id = if name == "Array" { self.array(vec![])? } else { self.object(ObjectKind::Plain) };
                     if name == "Array" {
-                        for (j, v) in args.into_iter().enumerate() {
-                            self.set(id, j.to_string(), v)?;
+                        // new Array(n) is n empty slots; new Array(a, b) lists them.
+                        if args.len() == 1 && matches!(args[0], Value::Number(_)) {
+                            self.set(id, "length", Value::Number(args[0].number().max(0.0)))?;
+                        } else {
+                            for (j, v) in args.into_iter().enumerate() {
+                                self.set(id, j.to_string(), v)?;
+                            }
+                            self.set(id, "length", Value::Number(n as f64))?;
                         }
-                        self.set(id, "length", Value::Number(n as f64))?;
                     } else if let Value::Object(class) = self.get(self.global, &name) {
                         if let Value::Object(proto) = self.get(class, "prototype") {
                             self.objects[id].prototype = Some(proto);
@@ -647,7 +679,20 @@ impl Vm {
                     } else {
                         pop(&mut stack)?
                     };
-                    let object = if matches!(op, 0x3d | 0xb0 | 0xb1) {
+                    let plain = matches!(op, 0x3d | 0xb0 | 0xb1);
+                    // A plain call resolves its name through the scope chain.
+                    let resolved = if plain && self.timeline_functions {
+                        match self.variable(scope, &method.text()) {
+                            Value::Object(f) => match self.objects.get(f).map(|o| o.kind.clone()) {
+                                Some(ObjectKind::Function(index)) => Some(index),
+                                _ => None,
+                            },
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+                    let object = if plain {
                         Value::Object(self.global)
                     } else {
                         pop(&mut stack)?
@@ -659,10 +704,18 @@ impl Vm {
                     let args = (0..count)
                         .map(|_| pop(&mut stack))
                         .collect::<Result<Vec<_>, _>>()?;
-                    let value = if let Value::Object(id) = object {
-                        self.call_method(id, &method.text(), args, host)?
-                    } else {
-                        Value::Undefined
+                    let value = match object {
+                        _ if resolved.is_some() => {
+                            let index = resolved.unwrap();
+                            let home = self.functions[index].home;
+                            self.invoke(index, home, args, host)?
+                        }
+                        Value::Object(id) => self.call_method(id, &method.text(), args, host)?,
+                        Value::Undefined => {
+                            host.missing_call(&method.text());
+                            Value::Undefined
+                        }
+                        primitive => host.primitive_call(self, &primitive, &method.text(), args)?,
                     };
                     if matches!(op, 0xb1 | 0xb3) {
                         return Ok(value);

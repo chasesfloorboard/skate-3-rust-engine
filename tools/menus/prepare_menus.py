@@ -36,10 +36,45 @@ def script_offsets(node, found):
     return found
 
 
+# Flash ClipEventFlags as one big-endian word (onClipEvent(load) = 0x01000000).
+CLIP_EVENTS = {0x01000000: 'load', 0x02000000: 'enterFrame', 0x04000000: 'unload', 0x08000000: 'mouseMove',
+               0x10000000: 'mouseDown', 0x20000000: 'mouseUp', 0x40000000: 'keyDown', 0x80000000: 'keyUp',
+               0x00010000: 'data', 0x00020000: 'initialize', 0x00040000: 'press', 0x00080000: 'release',
+               0x00100000: 'releaseOutside', 0x00200000: 'rollOver', 0x00400000: 'rollOut',
+               0x00800000: 'dragOver', 0x00000100: 'dragOut', 0x00000200: 'keyPress', 0x00000400: 'construct'}
+
+
+def clip_actions(node, raw, found):
+    """Placements with onClipEvent/on() handlers (flag 0x80): actions_offset
+    points at (count, pointer) and 12-byte records (event flags, key code,
+    script offset). Records are attached to the placement as clip_actions."""
+    if isinstance(node, dict):
+        if node.get('flags', 0) & 0x80 and node.get('actions_offset'):
+            at = node['actions_offset']
+            count = int.from_bytes(raw[at:at + 4], 'big')
+            table = int.from_bytes(raw[at + 4:at + 8], 'big')
+            records = []
+            for i in range(min(count, 64)):
+                r = table + i * 12
+                flags, key, script = (int.from_bytes(raw[r + k:r + k + 4], 'big') for k in (0, 4, 8))
+                records.append({'flags': flags, 'key': key, 'actions_offset': script,
+                                'events': [n for bit, n in CLIP_EVENTS.items() if flags & bit]})
+                found.add(script)
+            node['clip_actions'] = records
+            node['actions_offset'] = 0
+        for value in node.values():
+            clip_actions(value, raw, found)
+    elif isinstance(node, list):
+        for value in node:
+            clip_actions(value, raw, found)
+    return found
+
+
 def convert(apt_path: Path, const_path: Path, movie: str):
     data = inspect_apt(apt_path, const_path)
     actions = MenuActions(apt_path.read_bytes(), const_path.read_bytes())
-    blocks = {str(offset): actions.stream(offset) for offset in sorted(script_offsets(data, set()))}
+    handlers = clip_actions(data, apt_path.read_bytes(), set())
+    blocks = {str(offset): actions.stream(offset) for offset in sorted(script_offsets(data, set()) | handlers)}
     return {
         'format': 'skate3-menu-screen', 'version': 1, 'movie': movie,
         'source': {'apt_sha256': hashlib.sha256(apt_path.read_bytes()).hexdigest(),

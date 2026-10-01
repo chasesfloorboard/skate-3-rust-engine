@@ -22,6 +22,17 @@ pub struct Control {
     pub filter_pointer: u32,
     #[serde(default)]
     pub actions_offset: u32,
+    /// on(press)/onClipEvent handlers, parsed by tools/menus/prepare_menus.py.
+    #[serde(default)]
+    pub clip_actions: Vec<ClipAction>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct ClipAction {
+    pub flags: u32,
+    #[serde(default)]
+    pub key: u32,
+    pub actions_offset: u32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -33,6 +44,7 @@ pub struct Placement {
     pub name: String,
     pub clip_depth: i32,
     pub blend_mode: i32,
+    pub clip_actions: Vec<ClipAction>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -49,8 +61,8 @@ impl DisplayList {
                 if control.filter_pointer != 0 {
                     return Err("APT placement filter is not implemented".into());
                 }
-                if control.flags & 0x80 != 0 && control.actions_offset != 0 {
-                    return Err("APT placement clip actions are not implemented".into());
+                if control.flags & 0x80 != 0 && control.actions_offset != 0 && control.clip_actions.is_empty() {
+                    return Err("APT placement clip actions were not converted".into());
                 }
                 let mut placement = if control.flags & 1 != 0 {
                     self.depths.get(&control.depth).cloned().ok_or_else(|| {
@@ -68,6 +80,7 @@ impl DisplayList {
                         name: String::new(),
                         clip_depth: -1,
                         blend_mode: -1,
+                        clip_actions: Vec::new(),
                     }
                 };
                 if control.flags & 2 != 0 {
@@ -93,6 +106,9 @@ impl DisplayList {
                     placement.clip_depth = control
                         .clip_depth
                         .ok_or("APT clip-depth flag lacks value")?;
+                }
+                if control.flags & 0x80 != 0 {
+                    placement.clip_actions = control.clip_actions.clone();
                 }
                 if control.type_name == "place_object3" {
                     placement.blend_mode = control.blend_mode.unwrap_or(-1);
