@@ -43,12 +43,24 @@ class Entry:
 class Archive:
     """BigArchive look-alike over a Skate 2 BIGF file (RefPack inflated on read)."""
 
-    def __init__(self, path):
+    def __init__(self, path, shared=None):
         self.path = Path(path)
         self.entries = [Entry(name, offset, size) for name, offset, size in bigf.entries(self.path)]
+        self.sources = {e.path: self.path for e in self.entries}
+        # Some pros use stock create-a-skater textures, which Skate 2 keeps
+        # only in createacharacter.big: offer them under marquee/texture too.
+        if shared and Path(shared).exists():
+            known = set(self.sources)
+            for name, offset, size in bigf.entries(shared):
+                if '/createacharacter/texture/' in name:
+                    alias = 'data/content/marquee/texture/' + name.rsplit('/', 1)[1]
+                    if alias not in known:
+                        self.entries.append(Entry(alias, offset, size))
+                        self.sources[alias] = Path(shared)
+                        known.add(alias)
 
     def read(self, entry):
-        with self.path.open('rb') as f:
+        with self.sources[entry.path].open('rb') as f:
             f.seek(entry.offset)
             data = f.read(entry.size)
         if data[:2] == b'\x10\xfb':
@@ -64,9 +76,16 @@ def recipe(xml):
     import xml.etree.ElementTree as ET
     root = ET.fromstring(xml)
     for component in root.findall('comp'):
+        models = []
         for mod in component.findall('mod'):
             if mod.find('lod') is None:
                 component.remove(mod)
+            else:
+                models.append(mod)
+        # A second model in one slot (Terry Kennedy's two wrist items): the
+        # builder takes one per slot, so keep the first.
+        for mod in models[1:]:
+            component.remove(mod)
     return ET.tostring(root)
 
 
@@ -97,7 +116,7 @@ def main():
     parser.add_argument('--work', type=Path, default=Path.home() / 'Downloads/SkateDLC/work/roster')
     parser.add_argument('--only', nargs='*')
     args = parser.parse_args()
-    archive = Archive(args.skate2 / 'data/content/marquee.big')
+    archive = Archive(args.skate2 / 'data/content/marquee.big', args.skate2 / 'data/content/createacharacter.big')
     roster = characters(archive)
     if args.only:
         roster = [r for r in roster if r['key'] in args.only or r['recipe'] in args.only]
