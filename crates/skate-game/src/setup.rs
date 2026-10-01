@@ -25,6 +25,22 @@ fn installed(base: &Path) -> Result<Option<(PathBuf, serde_json::Value)>, String
     Ok(Some((assets, marker)))
 }
 
+/// Rerun setup for an existing copy to add the optional Skate 2 disc and DLC.
+pub(crate) fn add_skate2() -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let root = exe.parent().ok_or("No executable directory")?;
+    let setup = root.join(format!("support/skate3setup{}", std::env::consts::EXE_SUFFIX));
+    if !setup.is_file() { return Err("The setup helper is missing; unpack the complete package.".into()); }
+    let mut command = Command::new(setup);
+    command.arg("--base").arg(root.join("data")).arg("--game-exe").arg(&exe).arg("--refresh").arg("--add-skate2");
+    #[cfg(windows)] {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    let status = command.status().map_err(|e| format!("Could not start setup: {e}"))?;
+    if status.success() { Ok(()) } else { Err("Setup was cancelled or did not complete".into()) }
+}
+
 pub(crate) fn asset_root() -> Result<PathBuf, String> {
     if std::env::args_os().any(|arg| arg == "--assets") { return Ok(PathBuf::from("assets")); }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;

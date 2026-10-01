@@ -5,14 +5,14 @@ import argparse,os,queue,runpy,sys,threading,traceback
 ROOT=Path(getattr(sys,'_MEIPASS',Path(__file__).resolve().parents[1]))
 sys.path.insert(0,str(ROOT))
 
-def choose_source(window,filedialog):
-    title='Select your Skate 3 default.xex or Xbox 360 ISO'
+def choose_source(window,filedialog,game='Skate 3'):
+    title=f'Select your {game} default.xex or Xbox 360 ISO'
     if os.name!='nt':
         # Prefer the desktop's own file chooser; Tk's Linux dialog is minimal.
         import shutil,subprocess
         from tools.asset_pipeline.install import system_env
-        for command in (['zenity','--file-selection','--title',title,'--file-filter','Skate 3 game | default.xex *.iso *.ISO'],
-                        ['kdialog','--title',title,'--getopenfilename',str(Path.home()),'default.xex *.iso *.ISO|Skate 3 game']):
+        for command in (['zenity','--file-selection','--title',title,'--file-filter',f'{game} game | default.xex *.iso *.ISO'],
+                        ['kdialog','--title',title,'--getopenfilename',str(Path.home()),f'default.xex *.iso *.ISO|{game} game']):
             if shutil.which(command[0]):
                 try:
                     result=subprocess.run(command,capture_output=True,text=True,env=system_env())
@@ -20,7 +20,30 @@ def choose_source(window,filedialog):
                 # Exit code 1 is Cancel in both; anything else means it did not run.
                 if result.returncode in (0,1):return result.stdout.strip()
     return filedialog.askopenfilename(parent=window,title=title,
-        filetypes=[('Skate 3 game','default.xex *.iso *.ISO'),('Skate 3 executable','default.xex'),('Xbox 360 ISO','*.iso *.ISO')])
+        filetypes=[(f'{game} game','default.xex *.iso *.ISO'),(f'{game} executable','default.xex'),('Xbox 360 ISO','*.iso *.ISO')])
+
+def choose_folder(window,filedialog,title):
+    if os.name!='nt':
+        import shutil,subprocess
+        from tools.asset_pipeline.install import system_env
+        for command in (['zenity','--file-selection','--directory','--title',title],
+                        ['kdialog','--title',title,'--getexistingdirectory',str(Path.home())]):
+            if shutil.which(command[0]):
+                try:result=subprocess.run(command,capture_output=True,text=True,env=system_env())
+                except OSError:continue
+                if result.returncode in (0,1):return result.stdout.strip()
+    return filedialog.askdirectory(parent=window,title=title)
+
+def skate2_wanted(base,updating,changed):
+    """Whether to offer the optional Skate 2 disc: on first setup, when its
+    content is missing, or when it must be rebuilt and the last disc is gone."""
+    if not updating:return True
+    from tools.asset_pipeline.versions import installed
+    from tools.asset_pipeline.skate2_setup import status
+    previous=installed(base)
+    last=status(previous[0]) if previous else None
+    if not last or last.get('status')!='ready':return True
+    return 'skate2' in changed and not (last.get('source') and Path(last['source']).exists())
 
 def main():
     if len(sys.argv)>1 and sys.argv[1]=='--character-import':
@@ -43,6 +66,7 @@ def main():
     parser.add_argument('--base',type=Path,required=True)
     parser.add_argument('--game-exe',type=Path,required=True)
     parser.add_argument('--refresh',action='store_true')
+    parser.add_argument('--add-skate2',action='store_true',help='Offer the optional Skate 2 disc and DLC again')
     args=parser.parse_args()
     import tkinter as tk
     from tkinter import filedialog,messagebox,ttk
@@ -72,10 +96,17 @@ def main():
         nonlocal running
         iso=choose_source(window,filedialog)
         if not iso:return
+        skate2=dlc=None
+        if args.add_skate2 or skate2_wanted(args.base,updating,changed):
+            if messagebox.askyesno('Add Skate 2?','Do you also own Skate 2? Its city, DLC parks, soundtrack, movies, physics and characters become the Skate 2 edition (and join Freeskate).\n\nChoose No to skip; you can add it later.',parent=window):
+                skate2=choose_source(window,filedialog,'Skate 2') or None
+                if skate2 and messagebox.askyesno('Skate 2 DLC','Add Skate 2 DLC packs too (San Van Classic, Maloof Money Cup, Dyrdek\'s Fantasy Park)? Choose the folder holding the downloaded .zip files or LIVE packages.',parent=window):
+                    dlc=choose_folder(window,filedialog,'Select the folder with your Skate 2 DLC') or None
         button.config(state='disabled');running=True;progress.start()
         def work():
             try:
-                installed_root=install(Path(iso),args.base,args.game_exe,lambda text:messages.put(('progress',text)),refresh=updating)
+                installed_root=install(Path(iso),args.base,args.game_exe,lambda text:messages.put(('progress',text)),refresh=updating,
+                                       skate2=Path(skate2) if skate2 else None,skate2_dlc=Path(dlc) if dlc else None)
                 from tools.asset_pipeline.optional_content import summary
                 warnings=summary(installed_root)
                 messages.put(('done',f'Ready with {len(warnings)} unavailable components. Details: {installed_root / "setup-report.json"}' if warnings else 'Ready'))

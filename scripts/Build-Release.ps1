@@ -104,6 +104,36 @@ try {
     Copy-Item -LiteralPath docs/custom-models.md,docs/mixamo-to-skate.md -Destination "$stage/docs"
     Copy-Item -LiteralPath docs/character-customisation.md -Destination "$stage/docs"
     New-Item -ItemType Directory -Path "$stage/licenses" -Force | Out-Null
+    # Setup's audio/music/movie converters (same pinned builds as the Linux
+    # package): support/tools/ffmpeg.exe and vgmstream-cli.exe with its DLLs.
+    $downloads = Join-Path $ProjectRoot 'target/downloads'
+    New-Item -ItemType Directory -Path $downloads,"$stage/support/tools" -Force | Out-Null
+    function Get-Pinned([string]$Url, [string]$Sha256, [string]$Path) {
+        if (-not (Test-Path -LiteralPath $Path) -or (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLower() -ne $Sha256) {
+            Invoke-WebRequest -Uri $Url -OutFile "$Path.part" -UseBasicParsing
+            if ((Get-FileHash -LiteralPath "$Path.part" -Algorithm SHA256).Hash.ToLower() -ne $Sha256) { throw "Checksum mismatch: $Url" }
+            Move-Item -LiteralPath "$Path.part" -Destination $Path -Force
+        }
+    }
+    $ffTag = 'autobuild-2026-09-30-13-08'
+    $ffName = 'ffmpeg-n8.1.3-9-g29e619e767-win64-lgpl-8.1'
+    $ffZip = Join-Path $downloads "$ffName.zip"
+    Get-Pinned "https://github.com/BtbN/FFmpeg-Builds/releases/download/$ffTag/$ffName.zip" '4a7642b2264c03e8a0ce8a3825b933ee5580656f45695a086fe7e294045ffc0a' $ffZip
+    $vgmZip = Join-Path $downloads 'vgmstream-win64-r2117.zip'
+    Get-Pinned 'https://github.com/vgmstream/vgmstream/releases/download/r2117/vgmstream-win64.zip' '6c4a8a3813864fefed081bbd337dbc0ad93bf88e0b92f5db98d7ab258b22dc6c' $vgmZip
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = [IO.Compression.ZipFile]::OpenRead($ffZip)
+    try {
+        foreach ($entry in $archive.Entries) {
+            if ($entry.FullName -eq "$ffName/bin/ffmpeg.exe") { [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, "$stage/support/tools/ffmpeg.exe", $true) }
+            if ($entry.FullName -eq "$ffName/LICENSE.txt") { [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, "$stage/licenses/ffmpeg.txt", $true) }
+        }
+    } finally { $archive.Dispose() }
+    Add-Content -LiteralPath "$stage/licenses/ffmpeg.txt" -Value "FFmpeg $ffName (LGPL build), source: https://github.com/BtbN/FFmpeg-Builds/releases/tag/$ffTag"
+    Expand-Archive -LiteralPath $vgmZip -DestinationPath "$stage/support/tools" -Force
+    Move-Item -LiteralPath "$stage/support/tools/COPYING" -Destination "$stage/licenses/vgmstream.txt" -Force
+    Remove-Item -LiteralPath "$stage/support/tools/README.md","$stage/support/tools/USAGE.md" -ErrorAction SilentlyContinue
+    if (-not (Test-Path -LiteralPath "$stage/support/tools/ffmpeg.exe") -or -not (Test-Path -LiteralPath "$stage/support/tools/vgmstream-cli.exe")) { throw 'Audio converters missing from package' }
     Copy-Item -LiteralPath tools/mixamo_to_skate/licenses/FBX2glTF.txt -Destination "$stage/licenses/FBX2glTF.txt"
     Copy-Item -LiteralPath tools/vendor/utt/LICENSE -Destination "$stage/licenses/UTT.txt"
     Copy-Item -LiteralPath tools/vendor/university/LICENSE-PROJECT.md -Destination "$stage/licenses/CustomEngineLayer.txt"

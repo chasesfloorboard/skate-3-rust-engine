@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 import re
 
-GROUPS = ('core', 'hud', 'character', 'environment', 'maps')
+GROUPS = ('core', 'hud', 'character', 'environment', 'maps', 'skate2')
 COMMON = ('owned_game/**/*.py', 'asset_pipeline/fast_refpack.py', 'asset_pipeline/refpack_native.rs',
           'requirements-setup.txt')
 PARSERS = ('vendor/utt/**/*.py', 'vendor/university/**/*.py', 'vendor/utt/**/*.json', 'vendor/university/**/*.json')
@@ -24,6 +24,10 @@ SOURCES = {
     'maps': PARSERS + ('asset_pipeline/optional_content.py', 'asset_pipeline/map*.py', 'asset_pipeline/dynamic_props.py',
              'asset_pipeline/environment.py', 'asset_pipeline/irradiance.py',
              'asset_pipeline/retail_material.py', 'asset_pipeline/backdrop.py', 'asset_pipeline/sky.py'),
+    # Optional Skate 2 disc + DLC (asset_pipeline/skate2_setup.py).
+    'skate2': PARSERS + ('skate2/*.py', 'asset_pipeline/skate2_setup.py', 'prepare_audio.py', 'prepare_movies.py',
+               'asset_pipeline/native_roster.py', 'asset_pipeline/marquee_assets.py', 'asset_pipeline/character*.py',
+               'asset_pipeline/retail_character.py', 'asset_pipeline/vlt.py', 'asset_pipeline/names.txt'),
 }
 
 

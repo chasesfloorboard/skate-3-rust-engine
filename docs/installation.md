@@ -51,6 +51,28 @@ are recreated. A fresh launch defaults to University. Development checkouts
 with `assets/private/game.json` retain their existing local assets and default
 test world; `--assets DIRECTORY` also selects a prepared asset set explicitly.
 
+## Skate 2 (optional)
+
+After the Skate 3 disc, setup asks whether you also own Skate 2. Choose its
+`default.xex` (in an extracted disc folder) or its Xbox 360 ISO, and optionally
+the folder holding the Skate 2 DLC downloads (San Van Classic, Maloof Money Cup,
+Dyrdek's Fantasy Park: the `.zip` files as downloaded, or bare LIVE packages).
+Setup then prepares the Skate 2 edition, on Windows and Linux alike:
+
+- New San Vanelona and the DLC parks as locations, with their teleport spots,
+  photos, distant scenery and Skate 2 physics tuning
+- the disc's movies, its 52-song soundtrack and its pros and story characters
+  (Big Black, Slappy, Shingo...)
+
+The city conversion is the longest step and needs several GB of memory. Every
+Skate 2 part is optional: a failure is listed in `setup-report.json` and the
+rest of the game still installs. Choosing "No" is fine; the start-up game
+picker then offers **add skate 2...**, which reopens setup for it. Later
+refreshes reuse the Skate 2 disc chosen last time while it is still there.
+
+Setup encodes sounds, music and movies with the ffmpeg and vgmstream builds
+bundled in `support` (`support/tools` on Windows), so no system tools are needed.
+
 ## Conversion checks
 
 The direct converter was checked against an extracted Xbox 360 disc containing

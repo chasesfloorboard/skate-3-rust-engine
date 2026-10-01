@@ -36,6 +36,9 @@ pub(crate) struct Entry {
     game: Option<String>,
     #[serde(skip)]
     asset_prefix: String,
+    /// Native roster directory holding this entry (empty for the library).
+    #[serde(skip)]
+    roster: PathBuf,
 }
 #[derive(Clone, Deserialize)]
 struct Proportions {
@@ -116,8 +119,9 @@ pub(crate) struct CustomModels {
     pub active: Option<String>,
     entries: Vec<Entry>,
     directory: PathBuf,
-    native_directory: PathBuf,
-    native_prefix: String,
+    /// Native roster directories with their asset paths: the customiser
+    /// set's (Skate 3) and setup's Skate 2 roster.
+    natives: Vec<(PathBuf, String)>,
     request: Option<Option<String>>,
     pending: Option<Pending>,
     active_root: Option<Entity>,
@@ -150,7 +154,7 @@ impl CustomModels {
 impl CustomModels {
     pub(crate) fn online_selection(&self) -> Option<(Option<String>, PathBuf)> {
         let e = self.entries.iter().find(|e| Some(&e.id)==self.active.as_ref())?;
-        let directory = if e.asset_prefix.is_empty() { &self.directory } else { &self.native_directory };
+        let directory = if e.asset_prefix.is_empty() { &self.directory } else { &e.roster };
         Some((e.native.as_ref().map(|n|n.key.clone()),directory.join("entries").join(&e.id).join("character.glb")))
     }
     pub(crate) fn online_native_path(&self, key: &str) -> Option<String> {
@@ -311,7 +315,7 @@ fn discover(directory: &Path) -> Vec<Entry> {
     });
     entries
 }
-fn discover_all(directory: &Path, native_directory: &Path, native_prefix: &str) -> Vec<Entry> {
+fn discover_all(directory: &Path, natives: &[(PathBuf, String)]) -> Vec<Entry> {
     let mut entries = discover(directory);
     // Native rosters follow the edition: Skate 2's pros in Skate 2, Skate 3's
     // in Skate 3, both in Freeskate. Other games and imports are always there.
@@ -320,10 +324,13 @@ fn discover_all(directory: &Path, native_directory: &Path, native_prefix: &str) 
         use crate::editions::Game;
         edition.shows(Some(if e.game.as_deref() == Some("Skate 2") { Game::Skate2 } else { Game::Skate3 }))
     };
-    for mut native in discover(native_directory).into_iter().filter(|e| e.native.is_some() && shown(e)) {
-        entries.retain(|entry| entry.id != native.id);
-        native.asset_prefix = native_prefix.to_owned();
-        entries.push(native);
+    for (native_directory, native_prefix) in natives {
+        for mut native in discover(native_directory).into_iter().filter(|e| e.native.is_some() && shown(e)) {
+            entries.retain(|entry| entry.id != native.id);
+            native.asset_prefix = native_prefix.to_owned();
+            native.roster = native_directory.clone();
+            entries.push(native);
+        }
     }
     entries.sort_by_key(|e| (e.name.to_lowercase(), e.id.clone()));
     entries
@@ -347,9 +354,14 @@ impl Plugin for CustomModelsPlugin {
     fn build(&self, app: &mut App) {
         let directory = library_path();
         let assets = &app.world().resource::<crate::config::Config>().asset_root;
-        let native_directory = crate::customiser_parts::asset_directory(assets).join("native-roster");
-        let native_prefix = format!("{}/", native_directory.strip_prefix(assets).unwrap().to_string_lossy().replace('\\', "/"));
-        let entries = discover_all(&directory, &native_directory, &native_prefix);
+        let natives: Vec<(PathBuf, String)> = [
+            crate::customiser_parts::asset_directory(assets).join("native-roster"),
+            assets.join("private/skate2/native-roster"),
+        ].into_iter().filter_map(|d| {
+            let prefix = format!("{}/", d.strip_prefix(assets).ok()?.to_string_lossy().replace('\\', "/"));
+            Some((d, prefix))
+        }).collect();
+        let entries = discover_all(&directory, &natives);
         let saved = std::fs::read(directory.join("selection.json"))
             .ok()
             .and_then(|b| serde_json::from_slice::<Selection>(&b).ok())
@@ -362,8 +374,7 @@ impl Plugin for CustomModelsPlugin {
             active: None,
             entries,
             directory,
-            native_directory,
-            native_prefix,
+            natives,
             request: saved.map(Some),
             pending: None,
             active_root: None,
@@ -590,7 +601,7 @@ fn poll_import(mut state: ResMut<CustomModels>) {
         .ok()
         .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
     let _ = std::fs::remove_file(&job.result);
-    state.entries = discover_all(&state.directory, &state.native_directory, &state.native_prefix);
+    state.entries = discover_all(&state.directory, &state.natives);
     state.status = match reply.as_ref().and_then(|r| r["status"].as_str()) {
         Some("cancelled") => "Import cancelled. Your character is unchanged.".into(),
         Some("ready") => {
@@ -939,7 +950,7 @@ mod tests {
             std::fs::write(entry.join("character.glb"), b"fixture").unwrap();
             std::fs::write(entry.join("preview.png"), b"fixture").unwrap();
         }
-        let entries = discover_all(&personal, &native, "private/roster/");
+        let entries = discover_all(&personal, &[(native.clone(), "private/roster/".into())]);
         assert_eq!(entries.len(), 2);
         let pro = entries.iter().find(|e| e.id == pro_id).unwrap();
         assert_eq!(pro.name, "Current pro");

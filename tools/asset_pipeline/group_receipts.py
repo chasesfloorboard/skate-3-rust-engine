@@ -14,7 +14,17 @@ ROOTS = {
                     'assets/private/render-parameters.json', 'assets/private/exposure.json',
                     'assets/private/exposure-profiles.json', 'assets/private/teleports.json', 'assets/private/environment-status'),
     'maps': ('assets/private/native-props', 'maps.json', 'assets/private/map-status'),
+    'skate2': ('assets/private/skate2', 'assets/private/custom-locations', 'assets/private/audio/music-skate2',
+               'assets/private/stock/skater-collections-skate2.json'),
 }
+
+
+def skate2_owned(root, path):
+    """Skate 2 outputs written into folders other groups own: its physics in
+    stock/ and its city's sky and scenery copies (keys start with S2)."""
+    private = root/'assets/private'
+    return (path.name == 'skater-collections-skate2.json'
+            or (path.name.startswith('S2') and path.parent in (private/'native-skies', private/'native-backdrops')))
 
 
 def files(root, group):
@@ -26,6 +36,11 @@ def files(root, group):
         stock = root/'assets/private/stock'
         result.extend(p for p in stock.rglob('*')
                       if not p.is_relative_to(stock/'data/content/createacharacter'))
+    if group == 'skate2':
+        private = root/'assets/private'
+        result.extend(p for folder in ('native-skies', 'native-backdrops') for p in (private/folder).glob('S2*'))
+    else:
+        result = [p for p in result if not skate2_owned(root, p)]
     if group == 'maps':
         for item in json.loads((root/'maps.json').read_text()):
             path = (root/item['path']).resolve()

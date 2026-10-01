@@ -8,6 +8,8 @@ the customiser fingerprint) on it. Entries get "s2_" keys, so they never share
 an identity with the Skate 3 versions of the same pro, and "game": "Skate 2".
 
   python -m tools.skate2.roster --skate2 ~/Downloads/"Skate 2" --installation <install> [--only big_black]
+
+Output: <install>/assets/private/skate2/native-roster (setup's "skate2" group).
 """
 import argparse
 import json
@@ -104,33 +106,25 @@ def characters(archive):
     return result
 
 
-def native_directory(installation):
-    current = json.loads((installation / 'assets/private/customisation/current.json').read_text())
-    return installation / 'assets/private/customisation/sets' / current['set'] / 'native-roster'
-
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--skate2', type=Path, required=True)
-    parser.add_argument('--installation', type=Path, required=True)
-    parser.add_argument('--work', type=Path, default=Path.home() / 'Downloads/SkateDLC/work/roster')
-    parser.add_argument('--only', nargs='*')
-    args = parser.parse_args()
-    archive = Archive(args.skate2 / 'data/content/marquee.big', args.skate2 / 'data/content/createacharacter.big')
+def prepare(skate2, installation, work, report=print, only=None, library=None):
+    """Build the roster into <installation>/assets/private/skate2/native-roster
+    (setup's Skate 2 group owns it; the customiser set may be rebuilt)."""
+    archive = Archive(Path(skate2) / 'data/content/marquee.big', Path(skate2) / 'data/content/createacharacter.big')
     roster = characters(archive)
-    if args.only:
-        roster = [r for r in roster if r['key'] in args.only or r['recipe'] in args.only]
-    print(f'Skate 2 roster: {len(roster)} characters', flush=True)
+    if only:
+        roster = [r for r in roster if r['key'] in only or r['recipe'] in only]
+    report(f'Skate 2 characters: converting {len(roster)}')
     # Point the Skate 3 builder at this archive and roster.
     native_roster.BigArchive = lambda _path: archive
     native_roster.roster = lambda _rows: roster
-    collections = args.work / 'collections.json'
-    args.work.mkdir(parents=True, exist_ok=True)
+    work = Path(work)
+    work.mkdir(parents=True, exist_ok=True)
+    collections = work / 'collections.json'
     collections.write_text('{"collections": []}')
-    library = native_directory(args.installation)
+    library = Path(library) if library else Path(installation) / 'assets/private/skate2/native-roster'
     library.mkdir(parents=True, exist_ok=True)
-    report = native_roster.prepare(args.skate2, args.installation / 'assets', library, collections, args.work)
-    for item in report:
+    result = native_roster.prepare(Path(skate2), Path(installation) / 'assets', library, collections, work)
+    for item in result:
         if item['status'] != 'ready':
             continue
         manifest = library / 'entries' / item['id'] / 'manifest.json'
@@ -138,9 +132,22 @@ def main():
         if data.get('game') != 'Skate 2':
             data['game'] = 'Skate 2'
             manifest.write_text(json.dumps(data, indent=2))
-    ready = sum(r['status'] == 'ready' for r in report)
-    print(f'Skate 2 roster ready: {ready}/{len(report)} in {library}')
-    for r in report:
+    ready = sum(r['status'] == 'ready' for r in result)
+    (library / 'complete.json').write_text(json.dumps({'characters': ready, 'unavailable': [
+        {'key': r['key'], 'error': r.get('error', '')} for r in result if r['status'] != 'ready']}))
+    report(f'Skate 2 characters: {ready}/{len(result)} ready')
+    return result
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--skate2', type=Path, required=True)
+    parser.add_argument('--installation', type=Path, required=True)
+    parser.add_argument('--work', type=Path, default=Path.home() / '.cache/skate3rust-skate2/roster')
+    parser.add_argument('--only', nargs='*')
+    args = parser.parse_args()
+    result = prepare(args.skate2, args.installation, args.work, only=args.only)
+    for r in result:
         if r['status'] != 'ready':
             print(' ', r['status'], r['key'], r.get('error', ''))
 

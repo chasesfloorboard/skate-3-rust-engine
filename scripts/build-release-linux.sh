@@ -63,6 +63,14 @@ fetch "https://github.com/vgmstream/vgmstream/releases/download/$vgm_tag/vgmstre
     2f98c77f756079f63fbd119939067f1ed461d77e70993bc4cc372736d859c84a "$downloads/vgmstream-linux-$vgm_tag.zip"
 curl -sSfL -o "$downloads/vgmstream-COPYING" "https://raw.githubusercontent.com/vgmstream/vgmstream/$vgm_tag/COPYING"
 
+echo "== ffmpeg"
+# Static LGPL build (BtbN, pinned): setup encodes the disc's sounds, music
+# and movies with it, so players need no system ffmpeg.
+ff_tag=autobuild-2026-09-30-13-08
+ff_name=ffmpeg-n8.1.3-9-g29e619e767-linux64-lgpl-8.1
+fetch "https://github.com/BtbN/FFmpeg-Builds/releases/download/$ff_tag/$ff_name.tar.xz" \
+    dfa863a00ca81f1bdf58a372b18cff4820f0017e55de32778de8ecd8ed92a02e "$downloads/$ff_name.tar.xz"
+
 echo "== Setup helper"
 venv="$target/package-venv"
 [[ -x "$venv/bin/python" ]] || uv venv --quiet --python 3.12 --python-preference only-managed "$venv"
@@ -102,6 +110,8 @@ EOF
 install -m 755 "$xiso/build/extract-xiso" "$stage/support/extract-xiso"
 unzip -q -o -d "$stage/support" "$downloads/vgmstream-linux-$vgm_tag.zip" vgmstream-cli
 chmod 755 "$stage/support/vgmstream-cli"
+tar -xJf "$downloads/$ff_name.tar.xz" -C "$stage/support" --strip-components=2 "$ff_name/bin/ffmpeg"
+chmod 755 "$stage/support/ffmpeg"
 
 echo "== Package"
 strip -o "$stage/skate3rust" "$target/release/skate3rust"
@@ -122,6 +132,8 @@ cp vendor/bevy_pbr/LICENSE-MIT "$stage/licenses/Bevy-MIT.txt"
 cp vendor/bevy_pbr/LICENSE-APACHE "$stage/licenses/Bevy-APACHE.txt"
 cp "$xiso/LICENSE.TXT" "$stage/licenses/extract-xiso.txt" 2>/dev/null || cp "$xiso"/LICENSE* "$stage/licenses/extract-xiso.txt"
 cp "$downloads/vgmstream-COPYING" "$stage/licenses/vgmstream.txt"
+tar -xJOf "$downloads/$ff_name.tar.xz" "$ff_name/LICENSE.txt" > "$stage/licenses/ffmpeg.txt"
+echo "FFmpeg $ff_name (LGPL build), source: https://github.com/BtbN/FFmpeg-Builds/releases/tag/$ff_tag" >> "$stage/licenses/ffmpeg.txt"
 "$python" -c 'import sys,pathlib; print(pathlib.Path(sys.base_prefix,"lib/python3.12/LICENSE.txt").read_text())' > "$stage/licenses/Python.txt"
 
 "$python" - "$stage" "$source_stage/tools" <<'EOF'

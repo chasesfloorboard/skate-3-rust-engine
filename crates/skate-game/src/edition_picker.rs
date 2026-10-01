@@ -15,6 +15,10 @@ pub(crate) enum Outcome {
     Exit,
 }
 
+/// What the picker returns: an edition, or the "add skate 2" row.
+#[derive(Clone, Copy, PartialEq)]
+enum Choice { Edition(Edition), AddSkate2 }
+
 /// Decide the edition: --edition, else the picker for normal launches.
 /// Launches with any other arguments (development, verification, tools,
 /// multiplayer) or automation variables keep every piece of content.
@@ -30,27 +34,46 @@ pub(crate) fn resolve() -> Result<Outcome, String> {
     let choices = editions::installed(&assets);
     // Nothing to choose between: one game's content only shows up in Freeskate too.
     if choices.len() < 2 { return Ok(Outcome::Run(choices.first().copied().unwrap_or(Edition::Freeskate))); }
-    let Some(edition) = pick(&assets, choices) else { return Ok(Outcome::Exit) };
-    editions::remember(&assets, edition);
-    relaunch(edition)?;
-    Ok(Outcome::Exit)
+    // Without Skate 2 the picker also offers to add it (setup, then back here).
+    let offer = !choices.contains(&Edition::Skate2);
+    match pick(&assets, choices, offer) {
+        None => Ok(Outcome::Exit),
+        Some(Choice::AddSkate2) => {
+            if let Err(error) = crate::setup::add_skate2() { eprintln!("{error}"); }
+            relaunch(None)?;
+            Ok(Outcome::Exit)
+        }
+        Some(Choice::Edition(edition)) => {
+            editions::remember(&assets, edition);
+            relaunch(Some(edition))?;
+            Ok(Outcome::Exit)
+        }
+    }
 }
 
-fn relaunch(edition: Edition) -> Result<(), String> {
+fn relaunch(edition: Option<Edition>) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let mut command = std::process::Command::new(exe);
-    command.arg("--edition").arg(edition.key());
+    if let Some(edition) = edition { command.arg("--edition").arg(edition.key()); }
+    let title = edition.map_or("Skate Rust", Edition::window_title);
     #[cfg(unix)] {
         use std::os::unix::process::CommandExt;
-        Err(format!("Could not start {}: {}", edition.window_title(), command.exec()))
+        Err(format!("Could not start {title}: {}", command.exec()))
     }
     #[cfg(not(unix))] {
-        command.spawn().map(drop).map_err(|e| format!("Could not start {}: {e}", edition.window_title()))
+        command.spawn().map(drop).map_err(|e| format!("Could not start {title}: {e}"))
     }
 }
 
 #[derive(Resource)]
-struct Picker { choices: Vec<Edition>, selected: usize, chosen: Option<Edition>, skinned: bool }
+struct Picker { choices: Vec<Choice>, selected: usize, chosen: Option<Choice>, skinned: bool }
+
+const ADD_SKATE2_TITLE: &str = "add skate 2...";
+const ADD_SKATE2_DESCRIPTION: &str = "Own Skate 2? Choose its disc (and DLC) to add its city, parks, music and skaters.";
+impl Choice {
+    fn title(self) -> &'static str { match self { Choice::Edition(e) => e.title(), Choice::AddSkate2 => ADD_SKATE2_TITLE } }
+    fn description(self) -> &'static str { match self { Choice::Edition(e) => e.description(), Choice::AddSkate2 => ADD_SKATE2_DESCRIPTION } }
+}
 
 #[derive(Component)]
 struct Row(usize);
@@ -59,8 +82,10 @@ struct RowText(usize);
 #[derive(Component)]
 struct Description;
 
-fn pick(assets: &std::path::Path, choices: Vec<Edition>) -> Option<Edition> {
-    let selected = editions::last(assets).and_then(|last| choices.iter().position(|&c| c == last)).unwrap_or(0);
+fn pick(assets: &std::path::Path, editions: Vec<Edition>, offer_skate2: bool) -> Option<Choice> {
+    let mut choices: Vec<Choice> = editions.into_iter().map(Choice::Edition).collect();
+    if offer_skate2 { choices.push(Choice::AddSkate2); }
+    let selected = editions::last(assets).and_then(|last| choices.iter().position(|&c| c == Choice::Edition(last))).unwrap_or(0);
     let chosen = std::sync::Arc::new(std::sync::Mutex::new(None));
     let mut app = App::new();
     app.add_plugins(DefaultPlugins
@@ -85,14 +110,14 @@ fn pick(assets: &std::path::Path, choices: Vec<Edition>) -> Option<Edition> {
         .add_systems(Update, (crate::customiser::navigation, interact, draw).chain());
     let result = chosen.clone();
     app.add_systems(Last, move |picker: Res<Picker>, mut exit: MessageWriter<AppExit>| {
-        if let Some(edition) = picker.chosen {
-            *result.lock().unwrap() = Some(edition);
+        if let Some(choice) = picker.chosen {
+            *result.lock().unwrap() = Some(choice);
             exit.write(AppExit::Success);
         }
     });
     app.run();
-    let edition = *chosen.lock().unwrap();
-    edition
+    let choice = *chosen.lock().unwrap();
+    choice
 }
 
 /// Bitmap retail font when the menu skin is installed, else Bevy's text.

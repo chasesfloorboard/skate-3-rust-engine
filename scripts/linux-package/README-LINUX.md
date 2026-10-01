@@ -9,6 +9,10 @@
    into this folder's `data` directory. It needs about 8 GB of temporary space
    for an ISO and leaves roughly 1.3 GB behind. No game files are included or
    downloaded.
+4. Setup then asks whether you also own **Skate 2**. Choose its ISO or
+   `default.xex`, and optionally the folder with its DLC downloads, to add the
+   Skate 2 edition (city, DLC parks, soundtrack, movies, physics, characters).
+   You can skip it and add it later from the start-up picker (**add skate 2...**).
 
 Later launches go straight into the game. Plug in a controller before or after
 launching.
@@ -17,15 +21,12 @@ launching.
 - 64-bit Linux with glibc 2.31 or newer (Ubuntu 20.04+, Debian 11+, Fedora 32+,
   Arch, SteamOS 3 and similar).
 - A Vulkan driver (Mesa or NVIDIA), ALSA/PipeWire audio and udev.
-- Optional: `ffmpeg`, for board sounds, music and per-map ambience. Setup skips
-  these if ffmpeg is missing. To add them later, install ffmpeg, delete
-  `data/installation.json` and launch again.
 - Optional: `zenity` or `kdialog` for the desktop's own file picker and error pop-ups.
 
 ## Sound and music
-With `ffmpeg` installed, setup also converts the disc's board sounds (rolling,
-pops, landings, grinds, powerslides, bails), per-map ambience and the 46-song
-in-game soundtrack. In game, **N** skips to the next song and **M** mutes the
+Setup also converts the disc's board sounds (rolling, pops, landings, grinds,
+powerslides, bails), per-map ambience and the 46-song in-game soundtrack (plus
+Skate 2's 52 songs when you add it), using the ffmpeg bundled in `support`. In game, **N** skips to the next song and **M** mutes the
 music. The mapping from board events to clips lives in
 `data/installations/<id>/assets/private/audio/board/board.json` and can be edited
 without running setup again.

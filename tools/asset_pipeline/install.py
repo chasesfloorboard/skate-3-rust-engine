@@ -88,9 +88,13 @@ def system_env():
     return env
 
 def bundled_tool(name):
-    """A helper program shipped beside the Linux setup binary, else on PATH."""
-    bundled=Path(sys.executable).parent/name
-    if getattr(sys,'frozen',False) and bundled.is_file():return bundled
+    """A helper program shipped with the setup binary (support/ on Linux,
+    support/tools/*.exe with its DLLs on Windows), else on PATH."""
+    if getattr(sys,'frozen',False):
+        folder=Path(sys.executable).parent
+        suffix='.exe' if os.name=='nt' else ''
+        for bundled in (folder/(name+suffix),folder/'tools'/(name+suffix)):
+            if bundled.is_file():return bundled
     found=shutil.which(name)
     return Path(found) if found else None
 
@@ -188,13 +192,13 @@ def convert_map(archive,work,maps,stage,game_exe,log,report):
     return entry
 
 
-def install(iso,base,game_exe,report,game_root=None,refresh=False,finalize=None):
+def install(iso,base,game_exe,report,game_root=None,refresh=False,finalize=None,skate2=None,skate2_dlc=None):
     from .setup_state import setup_lock
     with setup_lock(base):
-        return _install(iso,base,game_exe,report,game_root,refresh,finalize)
+        return _install(iso,base,game_exe,report,game_root,refresh,finalize,skate2,skate2_dlc)
 
 
-def _install(iso,base,game_exe,report,game_root=None,refresh=False,finalize=None):
+def _install(iso,base,game_exe,report,game_root=None,refresh=False,finalize=None,skate2=None,skate2_dlc=None):
     from .versions import fingerprints, changed_groups, installed, GROUPS
     from .group_receipts import damaged, record
     from .setup_state import atomic_json
@@ -217,6 +221,15 @@ def _install(iso,base,game_exe,report,game_root=None,refresh=False,finalize=None
         if previous and previous[1].get('source_hash') not in (None,digest(game_root/'default.xex')):
             raise RuntimeError('Select the same Xbox game edition used to set up this copy')
     if previous:groups.update(damaged(*previous, exclude=groups))
+    # Skate 2 is optional: a newly chosen disc rebuilds its group; a refresh
+    # without one reuses the disc chosen last time if it is still there.
+    from .skate2_setup import status as skate2_status
+    if skate2 is not None:groups.add('skate2')
+    elif 'skate2' in groups and previous:
+        last=skate2_status(previous[0]) or {}
+        if last.get('source') and Path(last['source']).exists():
+            skate2=Path(last['source'])
+            if skate2_dlc is None and last.get('dlc') and Path(last['dlc']).exists():skate2_dlc=Path(last['dlc'])
     def outputs(stage):
         saved=previous[1].get('outputs',{}) if previous else {}
         return {g:saved[g] if g not in groups and g in saved else record(stage,g) for g in GROUPS}
@@ -368,6 +381,22 @@ def _install(iso,base,game_exe,report,game_root=None,refresh=False,finalize=None
                 for old in json.loads((previous[0]/'maps.json').read_text()):
                     if old['path'] not in valid_paths:(stage/old['path']).unlink(missing_ok=True)
             if not catalog:raise RuntimeError('No playable map could be prepared or recovered. Restore at least one worldDIST_*.big archive beside default.xex and retry; the previous installation has been kept.')
+        if 'skate2' in groups:
+            from .skate2_setup import prepare as prepare_skate2, write_status
+            from .group_receipts import skate2_owned
+            last=skate2_status(stage) or {}
+            if skate2 is None and last.get('status')=='ready':
+                # Keep the converted Skate 2 content from the previous copy.
+                write_status(stage,{**{k:v for k,v in last.items() if k!='version'},'status':'ready'})
+            else:
+                # Rebuild from scratch: drop the previous copy's Skate 2 outputs.
+                for name in ('skate2','custom-locations','audio/music-skate2'):
+                    if (private/name).is_dir():remove_intermediate(private/name,private)
+                for path in [*(private/'native-skies').glob('S2*'),*(private/'native-backdrops').glob('S2*'),
+                             private/'stock/skater-collections-skate2.json']:
+                    if path.is_file() and skate2_owned(stage,path):path.unlink()
+                    elif path.is_dir():remove_intermediate(path,private)
+                prepare_skate2(skate2,skate2_dlc,stage,game_exe,work,base,report,log)
         report('Validating installed runtime inputs')
         run([game_exe,'--assets',stage/'assets','--test-world','--check-assets'],log,report)
         settings=stage/'settings';settings.mkdir(exist_ok=True)
