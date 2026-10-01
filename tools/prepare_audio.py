@@ -9,10 +9,13 @@ Music: ipod.mpf holds 46 licensed songs as 30 consecutive stream segments each,
 in playlist order (verified: segments join sample-continuously within a song and
 the 30th ends in silence). Per-song gain comes from the ipod_playlist VLT record.
 Song titles are hashed IDs that are not resolved yet, so tracks are numbered.
+Skate 2's ipod.mpf has the same layout with 20 segments per song (52 songs);
+--skate2 DISC writes it to music-skate2 for the Skate 2 edition.
 
 Usage:
   python tools/prepare_audio.py --game-root DISC --installation INSTALL_DIR \
       [--vgmstream vgmstream-cli] [--ffmpeg ffmpeg] [--skip-music]
+  python tools/prepare_audio.py --skate2 SKATE2_DISC --installation INSTALL_DIR --music-only
 """
 import argparse
 import json
@@ -76,6 +79,7 @@ BODY_MAP = {
 }
 
 SEGMENTS_PER_SONG = 30
+SKATE2_SEGMENTS_PER_SONG = 20
 
 
 def stream_count(vgmstream, path, env):
@@ -242,24 +246,26 @@ def playlist_gains(installation):
     return None
 
 
-def prepare_music(game_root, installation, vgmstream, ffmpeg, report=print, env=None):
-    output = Path(installation) / 'assets/private/audio/music'
+def prepare_music(game_root, installation, vgmstream, ffmpeg, report=print, env=None, skate2=False):
+    output = Path(installation) / 'assets/private/audio' / ('music-skate2' if skate2 else 'music')
     output.mkdir(parents=True, exist_ok=True)
     source = Path(game_root) / 'data/audio/music/ipod.mpf'
     count = stream_count(vgmstream, source, env)
-    if count % SEGMENTS_PER_SONG:
+    per_song = SKATE2_SEGMENTS_PER_SONG if skate2 else SEGMENTS_PER_SONG
+    if count % per_song:
         raise RuntimeError(f'Unexpected iPod segment count {count}')
-    songs = count // SEGMENTS_PER_SONG
-    gains = playlist_gains(installation) or [(None, 1.0)] * songs
+    songs = count // per_song
+    # Skate 2's database has no ipod_playlist record: unity gain.
+    gains = (None if skate2 else playlist_gains(installation)) or [(None, 1.0)] * songs
     if len(gains) != songs:
         gains = [(None, 1.0)] * songs
     with tempfile.TemporaryDirectory() as temp:
         work = Path(temp)
 
         def convert(song):
-            first = song * SEGMENTS_PER_SONG + 1
+            first = song * per_song + 1
             parts = []
-            for index in range(first, first + SEGMENTS_PER_SONG):
+            for index in range(first, first + per_song):
                 wav = work / f'{index}.wav'
                 decode(vgmstream, source, index, wav, env)
                 parts.append(wav)
@@ -275,7 +281,8 @@ def prepare_music(game_root, installation, vgmstream, ffmpeg, report=print, env=
             for _ in pool.map(convert, range(songs)):
                 done += 1
                 report(f'Music: {done}/{songs} songs')
-    playlist = [{'file': f'{i + 1:02d}.ogg', 'title': f'Track {i + 1}', 'id': gains[i][0],
+    prefix = 'Skate 2 track' if skate2 else 'Track'
+    playlist = [{'file': f'{i + 1:02d}.ogg', 'title': f'{prefix} {i + 1}', 'id': gains[i][0],
                  'volume': round(gains[i][1], 3)} for i in range(songs)]
     (output / 'playlist.json').write_text(json.dumps(playlist, indent=2), encoding='utf-8')
     return output
@@ -283,7 +290,9 @@ def prepare_music(game_root, installation, vgmstream, ffmpeg, report=print, env=
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--game-root', type=Path, required=True)
+    parser.add_argument('--game-root', type=Path)
+    parser.add_argument('--skate2', type=Path, help='Skate 2 disc: convert its soundtrack')
+    parser.add_argument('--music-only', action='store_true')
     parser.add_argument('--installation', type=Path, required=True)
     parser.add_argument('--vgmstream', default='vgmstream-cli')
     parser.add_argument('--ffmpeg', default='ffmpeg')
@@ -293,6 +302,12 @@ def main():
         if not shutil.which(tool):
             raise SystemExit(f'Missing tool: {tool}')
     report = lambda text: print(text, flush=True)
+    if args.skate2:
+        print(f'Skate 2 music ready: {prepare_music(args.skate2, args.installation, args.vgmstream, args.ffmpeg, report, skate2=True)}')
+    if args.music_only or not args.game_root:
+        if args.game_root and not args.skip_music:
+            print(f'Music ready: {prepare_music(args.game_root, args.installation, args.vgmstream, args.ffmpeg, report)}')
+        return
     print(f'Board sounds ready: {prepare_board(args.game_root, args.installation, args.vgmstream, args.ffmpeg, report)}')
     if not args.skip_music:
         print(f'Music ready: {prepare_music(args.game_root, args.installation, args.vgmstream, args.ffmpeg, report)}')

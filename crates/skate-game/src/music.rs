@@ -1,4 +1,5 @@
-//! Soundtrack prepared by tools/prepare_audio.py from the disc's iPod playlist.
+//! Soundtrack prepared by tools/prepare_audio.py from the disc's iPod playlist
+//! (Skate 2 edition: Skate 2's, Freeskate: both games').
 //! Plays the playlist shuffled, pauses with the menu. N skips, M mutes.
 use bevy::{
     audio::{AudioSinkPlayback, Volume},
@@ -6,6 +7,16 @@ use bevy::{
 };
 
 const DIRECTORY: &str = "private/audio/music";
+const SKATE2_DIRECTORY: &str = "private/audio/music-skate2";
+
+fn directories() -> &'static [&'static str] {
+    use crate::editions::Edition;
+    match crate::editions::current() {
+        Edition::Skate2 => &[SKATE2_DIRECTORY],
+        Edition::Skate3 => &[DIRECTORY],
+        Edition::Freeskate => &[DIRECTORY, SKATE2_DIRECTORY],
+    }
+}
 const VOLUME: f32 = 0.45;
 
 #[derive(serde::Deserialize, Clone)]
@@ -39,22 +50,24 @@ impl Plugin for MusicPlugin {
 }
 
 fn load(mut commands: Commands, config: Res<crate::config::Config>) {
-    let path = config.asset_root.join(DIRECTORY).join("playlist.json");
-    let Ok(bytes) = std::fs::read(&path) else {
-        info!("Soundtrack not installed ({})", path.display());
-        return;
-    };
-    let tracks: Vec<Track> = match serde_json::from_slice(&bytes) {
-        Ok(tracks) => tracks,
-        Err(error) => {
-            warn!("Soundtrack disabled: {} is invalid: {error}", path.display());
-            return;
-        }
-    };
-    let tracks: Vec<Track> = tracks
-        .into_iter()
-        .filter(|t| config.asset_root.join(DIRECTORY).join(&t.file).is_file())
-        .collect();
+    let mut tracks = Vec::new();
+    for directory in directories() {
+        let path = config.asset_root.join(directory).join("playlist.json");
+        let Ok(bytes) = std::fs::read(&path) else {
+            info!("Soundtrack not installed ({})", path.display());
+            continue;
+        };
+        let list: Vec<Track> = match serde_json::from_slice(&bytes) {
+            Ok(list) => list,
+            Err(error) => {
+                warn!("Soundtrack skipped: {} is invalid: {error}", path.display());
+                continue;
+            }
+        };
+        tracks.extend(list.into_iter()
+            .map(|t| Track { file: format!("{directory}/{}", t.file), ..t })
+            .filter(|t| config.asset_root.join(&t.file).is_file()));
+    }
     if tracks.is_empty() {
         return;
     }
@@ -112,7 +125,7 @@ fn advance(
     // Starts silent; pause_with_menu applies the menu volume on the next frame.
     let mut settings = PlaybackSettings::DESPAWN.with_volume(Volume::Linear(0.0));
     settings.muted = playlist.muted;
-    commands.spawn((Song(VOLUME * track.volume), AudioPlayer::new(assets.load::<AudioSource>(format!("{DIRECTORY}/{}", track.file))), settings));
+    commands.spawn((Song(VOLUME * track.volume), AudioPlayer::new(assets.load::<AudioSource>(track.file.clone())), settings));
 }
 
 fn pause_with_menu(menu: Option<Res<crate::graphics_menu::Menu>>, mut songs: Query<(&Song, &mut AudioSink)>) {
